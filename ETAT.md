@@ -33,6 +33,6 @@ Ces fonctions compilent et leur logique est testée, mais personne n'a encore cl
 
 ## Pour reprendre
 
-- Dépôt GitHub privé : `devfrp/beat-studio`. Les deux derniers commits (clavier MIDI, puis toutes les nouveautés) ne sont pas encore envoyés : `git push`.
+- Dépôt GitHub privé : `devfrp/beat-studio`, à jour au 1er novembre 2026.
 - Le dossier `target` est un lien vers `/tmp/ca_target`, vidé au redémarrage : la première compilation suivante est plus longue.
 - Prochaine étape conseillée : essayer l'application (`cargo run`) et noter ce qui ne marche pas.
