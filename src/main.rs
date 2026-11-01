@@ -1,5 +1,6 @@
 mod editors;
 mod engine;
+mod file;
 mod ui;
 mod widgets;
 

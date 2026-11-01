@@ -54,6 +54,21 @@ impl Instrument {
             Instrument::Synth => "Synth",
         }
     }
+
+    /// Stable name used in project files.
+    pub fn key(self) -> &'static str {
+        match self {
+            Instrument::Kick => "kick",
+            Instrument::Clap => "clap",
+            Instrument::HiHat => "hihat",
+            Instrument::Snare => "snare",
+            Instrument::Synth => "synth",
+        }
+    }
+
+    pub fn from_key(s: &str) -> Option<Instrument> {
+        Instrument::ALL.into_iter().find(|i| i.key() == s)
+    }
 }
 
 #[derive(Clone)]
@@ -145,6 +160,8 @@ pub struct Voice {
 }
 
 pub struct Project {
+    pub title: String,
+    pub author: String,
     pub tempo: f64,
     pub swing: f32,
     pub channels: Vec<Channel>,
@@ -202,6 +219,8 @@ impl Project {
         }
         let n = channels.len();
         Project {
+            title: String::new(),
+            author: String::new(),
             tempo: DEFAULT_TEMPO,
             swing: MAIN_SWING,
             channels,

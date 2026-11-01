@@ -1,5 +1,6 @@
 // Main window: toolbar, browser, playlist. The editor windows live in editors.rs.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -9,6 +10,7 @@ use crate::engine::{
     self, Clip, Instrument, Mode, Note, Project, Shared, BEATS_PER_BAR, PLAYLIST_TRACKS, STEPS_PER_BAR,
     TEMPO_MAX, TEMPO_MIN, TICKS_PER_BAR, TICKS_PER_STEP,
 };
+use crate::file;
 use crate::widgets::*;
 
 const BROWSER_FOLDERS: [&str; 18] = [
@@ -53,6 +55,19 @@ struct ClipDrag {
     grab_bars: i64,
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum FileAction {
+    Open,
+    Save,
+    Export,
+}
+
+struct FileDialog {
+    action: FileAction,
+    name: String,
+    error: Option<String>,
+}
+
 pub struct StudioApp {
     shared: Shared,
     _stream: Option<cpal::Stream>,
@@ -67,6 +82,7 @@ pub struct StudioApp {
     show_about: bool,
     packs_open: bool,
     project_open: bool,
+    browser_open: HashSet<&'static str>,
     recording: bool,
     pub selected_channel: usize,
     pub selected_insert: usize,
@@ -76,6 +92,14 @@ pub struct StudioApp {
     pub last_note_len: u32,
     pub piano_scrolled: bool,
     pub hint: String,
+    file_dialog: Option<FileDialog>,
+    show_info: bool,
+    current_file: Option<PathBuf>,
+    /// Project text at the last save or open, to tell whether there are changes.
+    saved_text: String,
+    modified: bool,
+    next_check: f64,
+    shown_title: String,
 }
 
 impl StudioApp {
@@ -100,6 +124,7 @@ impl StudioApp {
                 p.clips.push(Clip { track: 0, start_bar: 1, pattern: 0 });
             }
         }
+        let saved_text = shared.lock().map(|p| file::to_text(&p)).unwrap_or_default();
         StudioApp {
             shared,
             _stream: stream,
@@ -114,6 +139,7 @@ impl StudioApp {
             show_about: false,
             packs_open: true,
             project_open: true,
+            browser_open: HashSet::new(),
             recording: false,
             selected_channel: 0,
             selected_insert: 0,
@@ -123,6 +149,171 @@ impl StudioApp {
             last_note_len: TICKS_PER_STEP * 2,
             piano_scrolled: false,
             hint: "Ready".into(),
+            file_dialog: None,
+            show_info: false,
+            current_file: None,
+            saved_text,
+            modified: false,
+            next_check: 0.0,
+            shown_title: String::new(),
+        }
+    }
+
+    // ---------------------------------------------------------------- files
+
+    /// Swaps in another project, keeping the sound device state.
+    fn replace_project(&mut self, p: &mut Project, new: Project, file: Option<PathBuf>) {
+        let (sr, ok) = (p.sample_rate, p.audio_ok);
+        *p = new;
+        p.sample_rate = sr;
+        p.audio_ok = ok;
+        self.selected_channel = 0;
+        self.piano_drag = None;
+        self.clip_drag = None;
+        self.saved_text = file::to_text(p);
+        self.modified = false;
+        self.current_file = file;
+    }
+
+    fn open_file(&mut self, p: &mut Project, path: PathBuf) -> Result<(), String> {
+        let new = file::open(&path)?;
+        self.hint = format!("Opened {}", file::display_name(&path));
+        self.replace_project(p, new, Some(path));
+        Ok(())
+    }
+
+    fn save_file(&mut self, p: &Project, path: PathBuf) -> Result<(), String> {
+        file::save(p, &path).map_err(|e| format!("Could not save: {e}"))?;
+        self.hint = format!("Saved {}", path.display());
+        self.saved_text = file::to_text(p);
+        self.modified = false;
+        self.current_file = Some(path);
+        Ok(())
+    }
+
+    /// Save to the current file, or ask for a name the first time.
+    fn quick_save(&mut self, p: &Project) {
+        match self.current_file.clone() {
+            Some(path) => {
+                if let Err(e) = self.save_file(p, path) {
+                    self.hint = e;
+                }
+            }
+            None => self.ask_file(FileAction::Save, p),
+        }
+    }
+
+    fn ask_file(&mut self, action: FileAction, p: &Project) {
+        let name = match &self.current_file {
+            Some(f) => file::display_name(f),
+            None if !p.title.trim().is_empty() => p.title.trim().to_string(),
+            None => "Untitled".into(),
+        };
+        self.file_dialog = Some(FileDialog { action, name, error: None });
+    }
+
+    fn file_window(&mut self, ctx: &egui::Context, p: &mut Project) {
+        let Some(mut d) = self.file_dialog.take() else { return };
+        let (title, verb) = match d.action {
+            FileAction::Open => ("Open project", "Open"),
+            FileAction::Save => ("Save project as", "Save"),
+            FileAction::Export => ("Export to WAV", "Export"),
+        };
+        let mut open = true;
+        let mut done = false;
+        egui::Window::new(title).open(&mut open).collapsible(false).resizable(false).default_width(340.0).show(ctx, |ui| {
+            ui.label(egui::RichText::new(format!("Folder: {}", file::projects_dir().display())).color(TEXT_DIM).size(11.0));
+            ui.add_space(4.0);
+            let projects = file::list_projects();
+            egui::ScrollArea::vertical().max_height(180.0).show(ui, |ui| {
+                if projects.is_empty() {
+                    ui.label(egui::RichText::new("No projects saved yet").color(TEXT_DIM));
+                }
+                for path in &projects {
+                    let name = file::display_name(path);
+                    let r = file_item(ui, &name, name == d.name);
+                    if r.clicked() {
+                        d.name = name.clone();
+                    }
+                    if r.double_clicked() && d.action == FileAction::Open {
+                        match self.open_file(p, path.clone()) {
+                            Ok(()) => done = true,
+                            Err(e) => d.error = Some(e),
+                        }
+                    }
+                }
+            });
+            ui.add_space(4.0);
+            let mut go = false;
+            ui.horizontal(|ui| {
+                ui.label("Name");
+                let r = ui.add(egui::TextEdit::singleline(&mut d.name).desired_width(200.0));
+                go |= r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+                go |= ui.button(verb).clicked();
+            });
+            if go && !done {
+                let result = match d.action {
+                    FileAction::Open => self.open_file(p, file::path_for(&d.name, file::EXTENSION)),
+                    FileAction::Save => self.save_file(p, file::path_for(&d.name, file::EXTENSION)),
+                    FileAction::Export => {
+                        let path = file::path_for(&d.name, "wav");
+                        match file::export_wav(p, &path) {
+                            Ok(secs) => {
+                                self.hint = format!("Exported {:.1} s to {}", secs, path.display());
+                                Ok(())
+                            }
+                            Err(e) => Err(format!("Could not export: {e}")),
+                        }
+                    }
+                };
+                match result {
+                    Ok(()) => done = true,
+                    Err(e) => d.error = Some(e),
+                }
+            }
+            if let Some(e) = &d.error {
+                ui.colored_label(RED, e);
+            }
+        });
+        if open && !done {
+            self.file_dialog = Some(d);
+        }
+    }
+
+    fn info_window(&mut self, ctx: &egui::Context, p: &mut Project) {
+        if !self.show_info {
+            return;
+        }
+        let mut open = true;
+        egui::Window::new("Project info").open(&mut open).collapsible(false).resizable(false).show(ctx, |ui| {
+            egui::Grid::new("info").num_columns(2).show(ui, |ui| {
+                ui.label("Title");
+                ui.text_edit_singleline(&mut p.title);
+                ui.end_row();
+                ui.label("Author");
+                ui.text_edit_singleline(&mut p.author);
+                ui.end_row();
+            });
+        });
+        self.show_info = open;
+    }
+
+    /// Notices unsaved changes (twice a second) and keeps the window title current.
+    fn track_changes(&mut self, ctx: &egui::Context, p: &Project) {
+        let now = ctx.input(|i| i.time);
+        if now >= self.next_check {
+            self.next_check = now + 0.5;
+            self.modified = file::to_text(p) != self.saved_text;
+        }
+        let name = match &self.current_file {
+            Some(f) => file::display_name(f),
+            None if !p.title.trim().is_empty() => p.title.trim().to_string(),
+            None => "Untitled".into(),
+        };
+        let title = format!("{}{} - Beat Studio", name, if self.modified { " *" } else { "" });
+        if title != self.shown_title {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
+            self.shown_title = title;
         }
     }
 
@@ -149,7 +340,28 @@ impl StudioApp {
     }
 
     fn shortcuts(&mut self, ctx: &egui::Context, p: &mut Project) {
-        if ctx.wants_keyboard_input() {
+        let (save, save_as, open, export) = ctx.input(|i| {
+            let cmd = i.modifiers.command;
+            (
+                cmd && !i.modifiers.shift && i.key_pressed(Key::S),
+                cmd && i.modifiers.shift && i.key_pressed(Key::S),
+                cmd && i.key_pressed(Key::O),
+                cmd && i.key_pressed(Key::R),
+            )
+        });
+        if save {
+            self.quick_save(p);
+        }
+        if save_as {
+            self.ask_file(FileAction::Save, p);
+        }
+        if open {
+            self.ask_file(FileAction::Open, p);
+        }
+        if export {
+            self.ask_file(FileAction::Export, p);
+        }
+        if ctx.wants_keyboard_input() || ctx.input(|i| i.modifiers.command) {
             return;
         }
         ctx.input(|i| {
@@ -208,13 +420,44 @@ impl StudioApp {
     fn menus(&mut self, ui: &mut Ui, p: &mut Project) {
         ui.menu_button("FILE", |ui| {
             if ui.button("New").clicked() {
-                let (sr, ok) = (p.sample_rate, p.audio_ok);
-                *p = Project::new();
-                p.sample_rate = sr;
-                p.audio_ok = ok;
-                self.selected_channel = 0;
+                self.replace_project(p, Project::new(), None);
                 ui.close_menu();
             }
+            if ui.button("Open...   Ctrl+O").clicked() {
+                self.ask_file(FileAction::Open, p);
+                ui.close_menu();
+            }
+            ui.menu_button("Open recent", |ui| {
+                let recent = file::list_projects();
+                if recent.is_empty() {
+                    ui.label(egui::RichText::new("No projects saved yet").color(TEXT_DIM));
+                }
+                for path in recent.into_iter().take(10) {
+                    if ui.button(file::display_name(&path)).clicked() {
+                        if let Err(e) = self.open_file(p, path) {
+                            self.hint = e;
+                        }
+                        ui.close_menu();
+                    }
+                }
+            });
+            if ui.button("Save   Ctrl+S").clicked() {
+                self.quick_save(p);
+                ui.close_menu();
+            }
+            if ui.button("Save as...   Ctrl+Shift+S").clicked() {
+                self.ask_file(FileAction::Save, p);
+                ui.close_menu();
+            }
+            if ui.button("Export to WAV...   Ctrl+R").clicked() {
+                self.ask_file(FileAction::Export, p);
+                ui.close_menu();
+            }
+            if ui.button("Project info...").clicked() {
+                self.show_info = true;
+                ui.close_menu();
+            }
+            ui.separator();
             if ui.button("Clear current pattern").clicked() {
                 for list in &mut p.patterns[p.current_pattern].notes {
                     list.clear();
@@ -429,8 +672,37 @@ impl StudioApp {
                         });
                     }
                     for name in BROWSER_FOLDERS {
-                        if folder(ui, name, false).clicked() {
-                            self.hint = format!("{name}: nothing here yet");
+                        let lists_projects = name == "My projects" || name == "Recent files";
+                        let open = self.browser_open.contains(name);
+                        if folder(ui, name, open).clicked() {
+                            if lists_projects {
+                                if !self.browser_open.remove(name) {
+                                    self.browser_open.insert(name);
+                                }
+                            } else {
+                                self.hint = format!("{name}: nothing here yet");
+                            }
+                        }
+                        if open {
+                            let mut projects = file::list_projects();
+                            if name == "My projects" {
+                                projects.sort_by_key(|f| file::display_name(f).to_lowercase());
+                            } else {
+                                projects.truncate(10);
+                            }
+                            ui.indent(name, |ui| {
+                                if projects.is_empty() {
+                                    ui.label(egui::RichText::new("no saved projects").color(TEXT_DIM).size(10.0));
+                                }
+                                for path in projects {
+                                    let sel = self.current_file.as_ref() == Some(&path);
+                                    if file_item(ui, &file::display_name(&path), sel).on_hover_text("Click to open").clicked() {
+                                        if let Err(e) = self.open_file(p, path) {
+                                            self.hint = e;
+                                        }
+                                    }
+                                }
+                            });
                         }
                     }
                 });
@@ -656,6 +928,9 @@ impl eframe::App for StudioApp {
         self.piano_roll(ctx, p);
         self.mixer(ctx, p);
         self.about(ctx);
+        self.file_window(ctx, p);
+        self.info_window(ctx, p);
+        self.track_changes(ctx, p);
         drop(guard);
         self.handle_screenshot(ctx);
         ctx.request_repaint_after(std::time::Duration::from_millis(16));
