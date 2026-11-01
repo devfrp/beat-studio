@@ -613,53 +613,70 @@ pub fn quantize_tempo(bpm: f64) -> f64 {
     (bpm * TEMPO_SCALE).round().clamp(TEMPO_RAW_MIN, TEMPO_RAW_MAX) / TEMPO_SCALE
 }
 
-/// Opens the default sound output. Returns the stream so it stays alive.
-pub fn start_audio(shared: Shared) -> Option<cpal::Stream> {
-    use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+/// Names of the sound outputs the system offers.
+pub fn output_devices() -> Vec<String> {
+    use cpal::traits::{DeviceTrait, HostTrait};
     let host = cpal::default_host();
-    let device = host.default_output_device()?;
+    let Ok(devices) = host.output_devices() else { return Vec::new() };
+    devices.filter_map(|d| d.name().ok()).collect()
+}
+
+/// Opens a sound output (the named one, else the default) with the given buffer
+/// size if the device accepts it. Returns the stream so it stays alive.
+pub fn start_audio(shared: Shared, device: Option<&str>, buffer: Option<u32>) -> Option<cpal::Stream> {
+    use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+    if let Ok(mut p) = shared.lock() {
+        p.audio_ok = false;
+    }
+    let host = cpal::default_host();
+    let named = device.and_then(|name| host.output_devices().ok()?.find(|d| d.name().ok().as_deref() == Some(name)));
+    let device = named.or_else(|| host.default_output_device())?;
     let supported = device.default_output_config().ok()?;
     let format = supported.sample_format();
-    let config: cpal::StreamConfig = supported.into();
-    let chans = config.channels as usize;
+    let base: cpal::StreamConfig = supported.into();
+    let chans = base.channels as usize;
     if let Ok(mut p) = shared.lock() {
-        p.sample_rate = config.sample_rate.0 as f32;
+        p.sample_rate = base.sample_rate.0 as f32;
     }
-    let err = |e| eprintln!("audio error: {e}");
-    let mut scratch: Vec<f32> = Vec::new();
-    let stream = match format {
-        cpal::SampleFormat::F32 => {
-            let s = shared.clone();
-            device.build_output_stream(
-                &config,
-                move |data: &mut [f32], _| match s.lock() {
-                    Ok(mut p) => p.render(data, chans),
-                    Err(_) => data.fill(0.0),
-                },
-                err,
-                None,
-            )
+    let build = |config: &cpal::StreamConfig| {
+        let err = |e| eprintln!("audio error: {e}");
+        match format {
+            cpal::SampleFormat::F32 => {
+                let s = shared.clone();
+                device.build_output_stream(
+                    config,
+                    move |data: &mut [f32], _| match s.lock() {
+                        Ok(mut p) => p.render(data, chans),
+                        Err(_) => data.fill(0.0),
+                    },
+                    err,
+                    None,
+                )
+            }
+            cpal::SampleFormat::I16 => {
+                let s = shared.clone();
+                let mut scratch: Vec<f32> = Vec::new();
+                device.build_output_stream(
+                    config,
+                    move |data: &mut [i16], _| {
+                        scratch.resize(data.len(), 0.0);
+                        if let Ok(mut p) = s.lock() {
+                            p.render(&mut scratch, chans);
+                        }
+                        for (d, x) in data.iter_mut().zip(&scratch) {
+                            *d = (x.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
+                        }
+                    },
+                    err,
+                    None,
+                )
+            }
+            _ => Err(cpal::BuildStreamError::StreamConfigNotSupported),
         }
-        cpal::SampleFormat::I16 => {
-            let s = shared.clone();
-            device.build_output_stream(
-                &config,
-                move |data: &mut [i16], _| {
-                    scratch.resize(data.len(), 0.0);
-                    if let Ok(mut p) = s.lock() {
-                        p.render(&mut scratch, chans);
-                    }
-                    for (d, x) in data.iter_mut().zip(&scratch) {
-                        *d = (x.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
-                    }
-                },
-                err,
-                None,
-            )
-        }
-        _ => return None,
-    }
-    .ok()?;
+    };
+    let fixed = buffer.map(|b| cpal::StreamConfig { buffer_size: cpal::BufferSize::Fixed(b), ..base.clone() });
+    // A device may refuse the buffer size; fall back to its own choice.
+    let stream = fixed.and_then(|c| build(&c).ok()).or_else(|| build(&base).ok())?;
     stream.play().ok()?;
     if let Ok(mut p) = shared.lock() {
         p.audio_ok = true;

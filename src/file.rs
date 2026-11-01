@@ -9,6 +9,7 @@ use crate::engine::{
 };
 
 pub const EXTENSION: &str = "bsp";
+pub const AUTOSAVE_NAME: &str = "Autosave";
 const MAGIC: &str = "BEATSTUDIO 1";
 pub const EXPORT_RATE: u32 = 44100;
 const EXPORT_TAIL_SECS: f32 = 2.0;

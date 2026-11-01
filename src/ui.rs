@@ -11,6 +11,7 @@ use crate::engine::{
     TEMPO_MAX, TEMPO_MIN, TICKS_PER_BAR, TICKS_PER_STEP,
 };
 use crate::file;
+use crate::settings::{self, Settings};
 use crate::widgets::*;
 
 /// Typing keyboard to piano, laid out like FL Studio: the bottom row starts at
@@ -150,13 +151,31 @@ pub struct StudioApp {
     modified: bool,
     next_check: f64,
     shown_title: String,
+    settings: Settings,
+    saved_settings: Settings,
+    restart_audio: bool,
+    show_audio: bool,
+    show_general: bool,
+    devices: Vec<String>,
+    last_autosave: f64,
+    autosaved_text: String,
 }
 
 impl StudioApp {
     pub fn new(cc: &eframe::CreationContext<'_>, screenshot: Option<PathBuf>) -> Self {
         apply_style(&cc.egui_ctx);
         let shared: Shared = Arc::new(Mutex::new(Project::new()));
-        let stream = if screenshot.is_none() { engine::start_audio(shared.clone()) } else { None };
+        // The screenshot check runs silent and with default settings.
+        let settings = if screenshot.is_none() { Settings::load() } else { Settings::default() };
+        cc.egui_ctx.set_zoom_factor(settings.ui_scale);
+        let stream = if screenshot.is_none() {
+            engine::start_audio(shared.clone(), settings.device.as_deref(), settings.buffer)
+        } else {
+            None
+        };
+        if let Ok(mut p) = shared.lock() {
+            p.metronome = settings.metronome;
+        }
         // Developer check: open every window with a sample beat.
         let open_all = std::env::var_os("BEATSTUDIO_OPEN_ALL").is_some();
         if open_all {
@@ -191,7 +210,7 @@ impl StudioApp {
             project_open: true,
             browser_open: HashSet::new(),
             recording: false,
-            typing_piano: true,
+            typing_piano: settings.typing_piano,
             keys_down: HashMap::new(),
             taps: Vec::new(),
             selected_channel: 0,
@@ -209,6 +228,14 @@ impl StudioApp {
             modified: false,
             next_check: 0.0,
             shown_title: String::new(),
+            saved_settings: settings.clone(),
+            settings,
+            restart_audio: false,
+            show_audio: false,
+            show_general: false,
+            devices: Vec::new(),
+            last_autosave: 0.0,
+            autosaved_text: String::new(),
         }
     }
 
@@ -216,10 +243,14 @@ impl StudioApp {
 
     /// Swaps in another project, keeping the sound device state.
     fn replace_project(&mut self, p: &mut Project, new: Project, file: Option<PathBuf>) {
-        let (sr, ok) = (p.sample_rate, p.audio_ok);
+        if self.modified || file::to_text(p) != self.saved_text {
+            self.autosave(p);
+        }
+        let (sr, ok, metronome) = (p.sample_rate, p.audio_ok, p.metronome);
         *p = new;
         p.sample_rate = sr;
         p.audio_ok = ok;
+        p.metronome = metronome;
         self.selected_channel = 0;
         self.piano_drag = None;
         self.clip_drag = None;
@@ -242,6 +273,25 @@ impl StudioApp {
         self.modified = false;
         self.current_file = Some(path);
         Ok(())
+    }
+
+    /// Backup copy of unsaved work, kept apart from the user's own files.
+    fn autosave(&mut self, p: &Project) {
+        if self.screenshot.is_some() {
+            return;
+        }
+        let text = file::to_text(p);
+        if text == self.autosaved_text {
+            return;
+        }
+        let path = file::path_for(file::AUTOSAVE_NAME, file::EXTENSION);
+        match file::save(p, &path) {
+            Ok(()) => {
+                self.autosaved_text = text;
+                self.hint = format!("Unsaved changes backed up in {}", file::AUTOSAVE_NAME);
+            }
+            Err(e) => self.hint = format!("Could not back up: {e}"),
+        }
     }
 
     /// Save to the current file, or ask for a name the first time.
@@ -351,12 +401,148 @@ impl StudioApp {
         self.show_info = open;
     }
 
+    fn audio_window(&mut self, ctx: &egui::Context, p: &Project) {
+        if !self.show_audio {
+            return;
+        }
+        let mut open = true;
+        egui::Window::new("Audio settings").open(&mut open).collapsible(false).resizable(false).show(ctx, |ui| {
+            egui::Grid::new("audio").num_columns(2).spacing(vec2(10.0, 6.0)).show(ui, |ui| {
+                ui.label("Output");
+                ui.horizontal(|ui| {
+                    let shown = self.settings.device.clone().unwrap_or_else(|| "System default".into());
+                    egui::ComboBox::from_id_salt("device").selected_text(shown).width(240.0).show_ui(ui, |ui| {
+                        if ui.selectable_label(self.settings.device.is_none(), "System default").clicked() {
+                            self.settings.device = None;
+                            self.restart_audio = true;
+                        }
+                        for d in &self.devices {
+                            if ui.selectable_label(self.settings.device.as_ref() == Some(d), d).clicked() {
+                                self.settings.device = Some(d.clone());
+                                self.restart_audio = true;
+                            }
+                        }
+                    });
+                    if ui.small_button("Refresh").clicked() {
+                        self.devices = engine::output_devices();
+                    }
+                });
+                ui.end_row();
+
+                ui.label("Buffer");
+                let ms = |frames: u32| frames as f32 / p.sample_rate * 1000.0;
+                let shown = match self.settings.buffer {
+                    Some(b) => format!("{b} samples ({:.1} ms)", ms(b)),
+                    None => "Automatic".into(),
+                };
+                egui::ComboBox::from_id_salt("buffer").selected_text(shown).width(240.0).show_ui(ui, |ui| {
+                    if ui.selectable_label(self.settings.buffer.is_none(), "Automatic").clicked() {
+                        self.settings.buffer = None;
+                        self.restart_audio = true;
+                    }
+                    for b in settings::BUFFER_SIZES {
+                        let label = format!("{b} samples ({:.1} ms)", ms(b));
+                        if ui.selectable_label(self.settings.buffer == Some(b), label).clicked() {
+                            self.settings.buffer = Some(b);
+                            self.restart_audio = true;
+                        }
+                    }
+                });
+                ui.end_row();
+
+                ui.label("Status");
+                if p.audio_ok {
+                    ui.label(format!("playing at {} Hz", p.sample_rate as u32));
+                } else {
+                    ui.colored_label(RED, "no sound output");
+                }
+                ui.end_row();
+            });
+            ui.label(egui::RichText::new("A smaller buffer reacts faster but may crackle.").color(TEXT_DIM).size(11.0));
+        });
+        self.show_audio = open;
+    }
+
+    fn general_window(&mut self, ctx: &egui::Context, p: &mut Project) {
+        if !self.show_general {
+            return;
+        }
+        let mut open = true;
+        egui::Window::new("General settings").open(&mut open).collapsible(false).resizable(false).show(ctx, |ui| {
+            egui::Grid::new("general").num_columns(2).spacing(vec2(10.0, 6.0)).show(ui, |ui| {
+                ui.label("Interface size");
+                egui::ComboBox::from_id_salt("scale").selected_text(format!("{:.0}%", self.settings.ui_scale * 100.0)).show_ui(ui, |ui| {
+                    for s in settings::UI_SCALES {
+                        if ui.selectable_label(self.settings.ui_scale == s, format!("{:.0}%", s * 100.0)).clicked() {
+                            self.settings.ui_scale = s;
+                            ctx.set_zoom_factor(s);
+                        }
+                    }
+                });
+                ui.end_row();
+
+                ui.label("Automatic backup");
+                let label = |m: u32| if m == 0 { "Off".to_string() } else { format!("every {m} min") };
+                egui::ComboBox::from_id_salt("autosave").selected_text(label(self.settings.autosave_minutes)).show_ui(ui, |ui| {
+                    for m in settings::AUTOSAVE_CHOICES {
+                        ui.selectable_value(&mut self.settings.autosave_minutes, m, label(m));
+                    }
+                });
+                ui.end_row();
+
+                ui.label("Metronome");
+                ui.checkbox(&mut p.metronome, "click on every beat (Ctrl+M)");
+                ui.end_row();
+
+                ui.label("Typing keyboard");
+                if ui.checkbox(&mut self.typing_piano, "play notes with the computer keyboard").changed() && !self.typing_piano {
+                    self.release_all_keys(p);
+                }
+                ui.end_row();
+            });
+            ui.label(
+                egui::RichText::new(format!("Backups go to {}.{} in {}", file::AUTOSAVE_NAME, file::EXTENSION, file::projects_dir().display()))
+                    .color(TEXT_DIM)
+                    .size(11.0),
+            );
+        });
+        self.show_general = open;
+    }
+
+    /// Applies changed settings: restarts the sound output if needed and writes
+    /// the settings file. Runs with the project unlocked (the audio thread locks it).
+    fn apply_settings(&mut self) {
+        if self.restart_audio {
+            self.restart_audio = false;
+            self._stream = None;
+            self._stream = engine::start_audio(self.shared.clone(), self.settings.device.as_deref(), self.settings.buffer);
+            if self._stream.is_none() {
+                self.hint = "Could not open that sound output".into();
+            }
+        }
+        if self.settings != self.saved_settings && self.screenshot.is_none() {
+            if let Err(e) = self.settings.save() {
+                self.hint = format!("Could not save settings: {e}");
+            }
+            self.saved_settings = self.settings.clone();
+        }
+    }
+
     /// Notices unsaved changes (twice a second) and keeps the window title current.
     fn track_changes(&mut self, ctx: &egui::Context, p: &Project) {
         let now = ctx.input(|i| i.time);
         if now >= self.next_check {
             self.next_check = now + 0.5;
             self.modified = file::to_text(p) != self.saved_text;
+        }
+        let minutes = self.settings.autosave_minutes;
+        if minutes == 0 {
+            self.last_autosave = now;
+        } else if now >= self.last_autosave + minutes as f64 * 60.0 {
+            self.last_autosave = now;
+            if self.modified {
+                self.autosave(p);
+            }
         }
         let name = match &self.current_file {
             Some(f) => file::display_name(f),
@@ -629,8 +815,15 @@ impl StudioApp {
                 self.release_all_keys(p);
             }
             ui.separator();
-            ui.label(if p.audio_ok { "Sound output: on" } else { "Sound output: not available" });
-            ui.label(format!("Sample rate: {} Hz", p.sample_rate as u32));
+            if ui.button("Audio settings...").clicked() {
+                self.show_audio = true;
+                self.devices = engine::output_devices();
+                ui.close_menu();
+            }
+            if ui.button("General settings...").clicked() {
+                self.show_general = true;
+                ui.close_menu();
+            }
         });
         ui.menu_button("TOOLS", |ui| {
             if ui.button("Fill every 4 steps").clicked() {
@@ -1065,8 +1258,13 @@ impl eframe::App for StudioApp {
         self.about(ctx);
         self.file_window(ctx, p);
         self.info_window(ctx, p);
+        self.audio_window(ctx, p);
+        self.general_window(ctx, p);
         self.track_changes(ctx, p);
+        self.settings.metronome = p.metronome;
+        self.settings.typing_piano = self.typing_piano;
         drop(guard);
+        self.apply_settings();
         self.handle_screenshot(ctx);
         ctx.request_repaint_after(std::time::Duration::from_millis(16));
     }
