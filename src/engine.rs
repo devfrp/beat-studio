@@ -26,6 +26,10 @@ pub const FADER_MAX: f32 = 16000.0;
 pub const NOTE_VELOCITY: u8 = 100;
 pub const PLAYLIST_TRACKS: usize = 24;
 pub const STEP_KEY: u8 = 60;
+/// Voices of the metronome are not tied to a channel.
+const METRONOME: usize = usize::MAX;
+/// Gate for notes played live: they ring until the key is released.
+const HELD_GATE_SECS: f32 = 30.0;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Instrument {
@@ -34,6 +38,8 @@ pub enum Instrument {
     HiHat,
     Snare,
     Synth,
+    /// Metronome click; not offered as a channel.
+    Click,
 }
 
 impl Instrument {
@@ -52,6 +58,7 @@ impl Instrument {
             Instrument::HiHat => "Hi-hat",
             Instrument::Snare => "Snare",
             Instrument::Synth => "Synth",
+            Instrument::Click => "Metronome",
         }
     }
 
@@ -63,6 +70,7 @@ impl Instrument {
             Instrument::HiHat => "hihat",
             Instrument::Snare => "snare",
             Instrument::Synth => "synth",
+            Instrument::Click => "click",
         }
     }
 
@@ -146,6 +154,7 @@ pub enum Mode {
 
 pub struct Voice {
     channel: usize,
+    key: u8,
     instrument: Instrument,
     freq: f32,
     gain: f32,
@@ -175,6 +184,10 @@ pub struct Project {
     pub sample_rate: f32,
     pub audio_ok: bool,
     pub previews: Vec<(usize, u8)>,
+    /// Notes played live (typing keyboard): they sound until listed in `releases`.
+    pub held: Vec<(usize, u8)>,
+    pub releases: Vec<(usize, u8)>,
+    pub metronome: bool,
     voices: Vec<Voice>,
 }
 
@@ -234,6 +247,9 @@ impl Project {
             sample_rate: 48000.0,
             audio_ok: false,
             previews: Vec::new(),
+            held: Vec::new(),
+            releases: Vec::new(),
+            metronome: false,
             voices: Vec::new(),
         }
     }
@@ -258,7 +274,7 @@ impl Project {
         }
         self.voices.retain(|v| v.channel != ch);
         for v in &mut self.voices {
-            if v.channel > ch {
+            if v.channel > ch && v.channel != METRONOME {
                 v.channel -= 1;
             }
         }
@@ -327,21 +343,31 @@ impl Project {
     }
 
     fn start_voice(&mut self, ch: usize, key: u8, vel: u8, len_ticks: u32) {
-        let Some(c) = self.channels.get(ch) else { return };
         let secs_per_tick = 15.0 / (self.tempo as f32 * PPQ as f32 / 4.0);
+        self.start_voice_secs(ch, key, vel, len_ticks as f32 * secs_per_tick);
+    }
+
+    fn start_voice_secs(&mut self, ch: usize, key: u8, vel: u8, gate: f32) {
+        let Some(c) = self.channels.get(ch) else { return };
         let base = match c.instrument {
             Instrument::Kick => 52.0,
             Instrument::Snare => 185.0,
             _ => 261.63,
         };
         let freq = base * 2f32.powf((key as f32 - 60.0) / 12.0);
-        let seed = 0x9E37_79B9u32 ^ ((ch as u32 + 1) * 7919) ^ ((key as u32) << 16) ^ self.voices.len() as u32;
+        let inst = c.instrument;
+        self.push_voice(ch, inst, key, freq, vel as f32 / 128.0, gate);
+    }
+
+    fn push_voice(&mut self, channel: usize, instrument: Instrument, key: u8, freq: f32, gain: f32, gate: f32) {
+        let seed = 0x9E37_79B9u32 ^ ((channel as u32).wrapping_add(1).wrapping_mul(7919)) ^ ((key as u32) << 16) ^ self.voices.len() as u32;
         self.voices.push(Voice {
-            channel: ch,
-            instrument: c.instrument,
+            channel,
+            key,
+            instrument,
             freq,
-            gain: vel as f32 / 128.0,
-            gate: len_ticks as f32 * secs_per_tick,
+            gain,
+            gate,
             t: 0.0,
             phase: 0.0,
             phase2: 0.0,
@@ -353,6 +379,33 @@ impl Project {
         if self.voices.len() > 64 {
             self.voices.remove(0);
         }
+    }
+
+    /// Metronome clicks for the beats in [from, to); the first beat of a bar is higher.
+    fn clicks_in(&self, from: f64, to: f64, out: &mut Vec<bool>) {
+        let mut beat = (from / PPQ as f64).ceil() as u32;
+        while ((beat * PPQ) as f64) < to {
+            out.push((beat * PPQ) % TICKS_PER_BAR == 0);
+            beat += 1;
+        }
+    }
+
+    /// Adds a live-played note to the current pattern at the nearest step.
+    /// Returns true when that step is still ahead, so the sequencer will play it.
+    pub fn record_note(&mut self, ch: usize, key: u8) -> bool {
+        if !self.playing || self.mode != Mode::Pattern || ch >= self.channels.len() {
+            return false;
+        }
+        let pat = &mut self.patterns[self.current_pattern];
+        let len = pat.length_ticks();
+        let steps = len / TICKS_PER_STEP;
+        let step = (self.position / TICKS_PER_STEP as f64).round() as u32 % steps;
+        let start = step * TICKS_PER_STEP;
+        let list = &mut pat.notes[ch];
+        if !list.iter().any(|n| n.start == start && n.key == key) {
+            list.push(Note { key, start, len: TICKS_PER_STEP, vel: NOTE_VELOCITY });
+        }
+        (start as f64) > self.position || (step == 0 && self.position > (len - TICKS_PER_STEP) as f64)
     }
 
     /// Fill an interleaved stereo buffer.
@@ -368,9 +421,18 @@ impl Project {
         for (ch, key) in previews {
             self.start_voice(ch, key, NOTE_VELOCITY, TICKS_PER_STEP * 2);
         }
+        for (ch, key) in std::mem::take(&mut self.held) {
+            self.start_voice_secs(ch, key, NOTE_VELOCITY, HELD_GATE_SECS);
+        }
+        for (ch, key) in std::mem::take(&mut self.releases) {
+            for v in self.voices.iter_mut().filter(|v| v.channel == ch && v.key == key && v.gate > v.t) {
+                v.gate = v.t;
+            }
+        }
 
         const CHUNK: usize = 32;
         let mut events = Vec::new();
+        let mut clicks = Vec::new();
         let mut frame = 0;
         while frame < frames {
             let n = CHUNK.min(frames - frame);
@@ -393,6 +455,19 @@ impl Project {
                 for &(ch, note) in &events {
                     self.start_voice(ch, note.key, note.vel, note.len);
                 }
+                if self.metronome {
+                    clicks.clear();
+                    if to <= len {
+                        self.clicks_in(from, to, &mut clicks);
+                    } else {
+                        self.clicks_in(from, len, &mut clicks);
+                        self.clicks_in(0.0, to - len, &mut clicks);
+                    }
+                    for &accent in &clicks {
+                        let freq = if accent { 1760.0 } else { 1320.0 };
+                        self.push_voice(METRONOME, Instrument::Click, 0, freq, if accent { 0.5 } else { 0.35 }, 0.03);
+                    }
+                }
                 self.position = if to >= len { to - len } else { to };
             }
 
@@ -401,6 +476,11 @@ impl Project {
                 let mut r = 0.0f32;
                 for v in &mut self.voices {
                     let s = voice_sample(v, dt);
+                    if v.channel == METRONOME {
+                        l += s * v.gain;
+                        r += s * v.gain;
+                        continue;
+                    }
                     let ch = &self.channels[v.channel.min(self.channels.len() - 1)];
                     if !ch.enabled {
                         continue;
@@ -465,6 +545,7 @@ fn voice_done(v: &Voice) -> bool {
         Instrument::HiHat => 0.25,
         Instrument::Snare => 0.45,
         Instrument::Synth => return v.t > v.gate + 0.35,
+        Instrument::Click => 0.05,
     };
     v.t > tail
 }
@@ -519,6 +600,10 @@ fn voice_sample(v: &mut Voice, dt: f32) -> f32 {
             let cutoff = 0.05 + 0.25 * (-t * 5.0).exp();
             v.lp += (saw - v.lp) * cutoff;
             v.lp * env * 0.32
+        }
+        Instrument::Click => {
+            v.phase = (v.phase + v.freq * dt).fract();
+            (v.phase * TAU).sin() * (-t * 90.0).exp()
         }
     }
 }
@@ -596,5 +681,33 @@ mod tests {
         let mut buf = vec![0.0; 48000 * 2];
         p.render(&mut buf, 2);
         assert!(buf.iter().any(|x| x.abs() > 0.05));
+    }
+
+    #[test]
+    fn metronome_clicks_on_beats() {
+        let mut p = Project::new();
+        p.metronome = true;
+        p.playing = true;
+        let mut buf = vec![0.0; 48000 * 2];
+        p.render(&mut buf, 2);
+        assert!(buf.iter().any(|x| x.abs() > 0.05));
+        let mut clicks = Vec::new();
+        p.clicks_in(0.0, TICKS_PER_BAR as f64, &mut clicks);
+        assert_eq!(clicks, vec![true, false, false, false]);
+    }
+
+    #[test]
+    fn recording_snaps_to_steps() {
+        let mut p = Project::new();
+        p.playing = true;
+        p.position = 25.0;
+        assert!(!p.record_note(0, 60)); // step 2 starts at 24, already passed
+        p.position = 40.0;
+        assert!(p.record_note(0, 60)); // step 3 at 48 is still ahead
+        assert!(p.patterns[0].has_step(0, 1));
+        assert!(p.patterns[0].has_step(0, 2));
+        p.position = (TICKS_PER_BAR - 5) as f64;
+        assert!(p.record_note(1, 60)); // wraps to the first step
+        assert!(p.patterns[0].has_step(1, 0));
     }
 }

@@ -1,6 +1,6 @@
 // Main window: toolbar, browser, playlist. The editor windows live in editors.rs.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -12,6 +12,53 @@ use crate::engine::{
 };
 use crate::file;
 use crate::widgets::*;
+
+/// Typing keyboard to piano, laid out like FL Studio: the bottom row starts at
+/// the normal pitch (C5 = key 60), the top row an octave higher. Physical key
+/// positions are used, so the layout is the same on AZERTY and QWERTY.
+const TYPING_PIANO: [(Key, u8); 30] = [
+    (Key::Z, 60),
+    (Key::S, 61),
+    (Key::X, 62),
+    (Key::D, 63),
+    (Key::C, 64),
+    (Key::V, 65),
+    (Key::G, 66),
+    (Key::B, 67),
+    (Key::H, 68),
+    (Key::N, 69),
+    (Key::J, 70),
+    (Key::M, 71),
+    (Key::Comma, 72),
+    (Key::Q, 72),
+    (Key::Num2, 73),
+    (Key::W, 74),
+    (Key::Num3, 75),
+    (Key::E, 76),
+    (Key::R, 77),
+    (Key::Num5, 78),
+    (Key::T, 79),
+    (Key::Num6, 80),
+    (Key::Y, 81),
+    (Key::Num7, 82),
+    (Key::U, 83),
+    (Key::I, 84),
+    (Key::Num9, 85),
+    (Key::O, 86),
+    (Key::Num0, 87),
+    (Key::P, 88),
+];
+
+/// A shortcut key press, ignoring keys taken by the typing keyboard piano (on
+/// AZERTY the 6 key types "-", which would also change the pattern).
+fn shortcut_pressed(i: &egui::InputState, k: Key, piano: bool) -> bool {
+    i.events.iter().any(|e| match e {
+        egui::Event::Key { key, physical_key, pressed: true, repeat: false, .. } if *key == k => {
+            !(piano && physical_key.is_some_and(|pk| TYPING_PIANO.iter().any(|(m, _)| *m == pk)))
+        }
+        _ => false,
+    })
+}
 
 const BROWSER_FOLDERS: [&str; 18] = [
     "Recent files",
@@ -84,6 +131,9 @@ pub struct StudioApp {
     project_open: bool,
     browser_open: HashSet<&'static str>,
     recording: bool,
+    pub typing_piano: bool,
+    keys_down: HashMap<Key, (usize, u8)>,
+    taps: Vec<f64>,
     pub selected_channel: usize,
     pub selected_insert: usize,
     pub paint: Option<bool>,
@@ -141,6 +191,9 @@ impl StudioApp {
             project_open: true,
             browser_open: HashSet::new(),
             recording: false,
+            typing_piano: true,
+            keys_down: HashMap::new(),
+            taps: Vec::new(),
             selected_channel: 0,
             selected_insert: 0,
             paint: None,
@@ -340,15 +393,19 @@ impl StudioApp {
     }
 
     fn shortcuts(&mut self, ctx: &egui::Context, p: &mut Project) {
-        let (save, save_as, open, export) = ctx.input(|i| {
+        let (save, save_as, open, export, metro) = ctx.input(|i| {
             let cmd = i.modifiers.command;
             (
                 cmd && !i.modifiers.shift && i.key_pressed(Key::S),
                 cmd && i.modifiers.shift && i.key_pressed(Key::S),
                 cmd && i.key_pressed(Key::O),
                 cmd && i.key_pressed(Key::R),
+                cmd && i.key_pressed(Key::M),
             )
         });
+        if metro {
+            p.metronome = !p.metronome;
+        }
         if save {
             self.quick_save(p);
         }
@@ -362,10 +419,16 @@ impl StudioApp {
             self.ask_file(FileAction::Export, p);
         }
         if ctx.wants_keyboard_input() || ctx.input(|i| i.modifiers.command) {
+            self.release_all_keys(p);
             return;
         }
+        if self.typing_piano {
+            self.typing_keys(ctx, p);
+        }
+        let piano = self.typing_piano;
         ctx.input(|i| {
-            if i.key_pressed(Key::Space) {
+            let key_pressed = |k: Key| shortcut_pressed(i, k, piano);
+            if key_pressed(Key::Space) {
                 p.playing = !p.playing;
             }
             if i.key_pressed(Key::F5) {
@@ -383,18 +446,76 @@ impl StudioApp {
             if i.key_pressed(Key::F9) {
                 self.show_mixer = !self.show_mixer;
             }
-            if i.key_pressed(Key::L) {
+            if key_pressed(Key::L) {
                 p.mode = if p.mode == Mode::Pattern { Mode::Song } else { Mode::Pattern };
                 p.position = 0.0;
             }
-            if i.key_pressed(Key::Plus) || i.key_pressed(Key::Equals) {
+            if key_pressed(Key::Plus) || key_pressed(Key::Equals) {
                 p.ensure_pattern(p.current_pattern + 1);
                 p.current_pattern += 1;
             }
-            if i.key_pressed(Key::Minus) && p.current_pattern > 0 {
+            if key_pressed(Key::Minus) && p.current_pattern > 0 {
                 p.current_pattern -= 1;
             }
         });
+    }
+
+    fn typing_keys(&mut self, ctx: &egui::Context, p: &mut Project) {
+        // Key releases are missed while the window is in the background.
+        if !ctx.input(|i| i.viewport().focused.unwrap_or(true)) {
+            self.release_all_keys(p);
+            return;
+        }
+        let events: Vec<(Key, bool)> = ctx.input(|i| {
+            i.events
+                .iter()
+                .filter_map(|e| match e {
+                    egui::Event::Key { key, physical_key, pressed, repeat: false, .. } => Some((physical_key.unwrap_or(*key), *pressed)),
+                    _ => None,
+                })
+                .collect()
+        });
+        for (key, pressed) in events {
+            let Some(&(_, note)) = TYPING_PIANO.iter().find(|(k, _)| *k == key) else { continue };
+            if pressed {
+                if self.keys_down.contains_key(&key) {
+                    continue;
+                }
+                let ch = self.selected_channel.min(p.channels.len() - 1);
+                let ahead = self.recording && p.record_note(ch, note);
+                if self.recording && p.mode == Mode::Song {
+                    self.hint = "Recording works in pattern mode (PAT)".into();
+                }
+                if !ahead {
+                    p.held.push((ch, note));
+                }
+                self.keys_down.insert(key, (ch, note));
+            } else if let Some(n) = self.keys_down.remove(&key) {
+                p.releases.push(n);
+            }
+        }
+    }
+
+    fn release_all_keys(&mut self, p: &mut Project) {
+        p.releases.extend(self.keys_down.drain().map(|(_, n)| n));
+    }
+
+    /// Tempo from the average gap between the last taps; a pause of 2 s starts over.
+    fn tap_tempo(&mut self, now: f64, p: &mut Project) {
+        if self.taps.last().is_some_and(|&t| now - t > 2.0) {
+            self.taps.clear();
+        }
+        self.taps.push(now);
+        if self.taps.len() > 8 {
+            self.taps.remove(0);
+        }
+        if self.taps.len() >= 2 {
+            let gap = (self.taps[self.taps.len() - 1] - self.taps[0]) / (self.taps.len() - 1) as f64;
+            p.tempo = engine::quantize_tempo((60.0 / gap).round());
+            self.hint = format!("Tap tempo: {:.0} BPM", p.tempo);
+        } else {
+            self.hint = "Tap tempo: keep tapping in time".into();
+        }
     }
 
     // ---------------------------------------------------------------- top bar
@@ -503,6 +624,11 @@ impl StudioApp {
             ui.checkbox(&mut self.show_mixer, "Mixer   F9");
         });
         ui.menu_button("OPTIONS", |ui| {
+            ui.checkbox(&mut p.metronome, "Metronome   Ctrl+M");
+            if ui.checkbox(&mut self.typing_piano, "Typing keyboard to piano").changed() && !self.typing_piano {
+                self.release_all_keys(p);
+            }
+            ui.separator();
             ui.label(if p.audio_ok { "Sound output: on" } else { "Sound output: not available" });
             ui.label(format!("Sample rate: {} Hz", p.sample_rate as u32));
         });
@@ -544,8 +670,13 @@ impl StudioApp {
             p.stop();
         }
         let rec = big_button(ui, "record", Some(if self.recording { RED } else { Color32::from_rgb(0xB0, 0x60, 0x5C) }));
-        if rec.on_hover_text("Record (marks the button only)").clicked() {
+        let rec_tip = "Record: notes played on the typing keyboard are added to the pattern while it plays";
+        if rec.on_hover_text(rec_tip).clicked() {
             self.recording = !self.recording;
+            self.hint = if self.recording { "Recording armed: press play, then play notes on the keyboard".into() } else { "Recording off".into() };
+        }
+        if led_button(ui, "METRO", p.metronome).on_hover_text("Metronome (Ctrl+M)").clicked() {
+            p.metronome = !p.metronome;
         }
 
         lcd(ui, |ui| {
@@ -556,6 +687,10 @@ impl StudioApp {
             }
             ui.label(egui::RichText::new("BPM").color(TEXT_DIM).size(9.0));
         });
+        if ui.small_button("TAP").on_hover_text("Click in time to set the tempo").clicked() {
+            let now = ui.input(|i| i.time);
+            self.tap_tempo(now, p);
+        }
 
         let pos = p.position as u32;
         let bar = pos / TICKS_PER_BAR + 1;
