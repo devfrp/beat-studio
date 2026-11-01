@@ -1,8 +1,14 @@
+mod audiofile;
 mod editors;
+mod effects;
 mod engine;
 mod file;
 mod midi;
+mod plugin;
+mod record;
 mod settings;
+mod smf;
+mod tools;
 mod ui;
 mod widgets;
 
@@ -14,6 +20,18 @@ fn main() -> eframe::Result<()> {
     while let Some(a) = args.next() {
         if a == "--screenshot" {
             screenshot = args.next().map(PathBuf::from);
+        }
+        // Child process used by the plugin scan (see plugin.rs).
+        if a == "--clap-scan" {
+            let Some(path) = args.next() else { std::process::exit(2) };
+            let code = match plugin::scan_file_here(std::path::Path::new(&path)) {
+                Ok(()) => 0,
+                Err(e) => {
+                    eprintln!("{e}");
+                    1
+                }
+            };
+            std::process::exit(code);
         }
     }
 

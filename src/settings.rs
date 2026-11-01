@@ -22,20 +22,38 @@ pub struct Settings {
     pub typing_piano: bool,
     /// MIDI input name, or midi::AUTO / midi::OFF.
     pub midi_input: String,
+    /// Sound input for audio recording; None = the system default.
+    pub input_device: Option<String>,
+    /// The record button also records sound from the input.
+    pub record_audio: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { device: None, buffer: None, ui_scale: 1.0, autosave_minutes: 5, metronome: false, typing_piano: true, midi_input: midi::AUTO.into() }
+        Settings {
+            device: None,
+            buffer: None,
+            ui_scale: 1.0,
+            autosave_minutes: 5,
+            metronome: false,
+            typing_piano: true,
+            midi_input: midi::AUTO.into(),
+            input_device: None,
+            record_audio: false,
+        }
     }
 }
 
 fn path() -> PathBuf {
+    config_dir().join("settings.txt")
+}
+
+pub fn config_dir() -> PathBuf {
     let base = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
         .unwrap_or_else(|| PathBuf::from("."));
-    base.join("beatstudio").join("settings.txt")
+    base.join("beatstudio")
 }
 
 impl Settings {
@@ -53,7 +71,7 @@ impl Settings {
 
     fn to_text(&self) -> String {
         format!(
-            "device = {}\nbuffer = {}\nui_scale = {}\nautosave_minutes = {}\nmetronome = {}\ntyping_piano = {}\nmidi_input = {}\n",
+            "device = {}\nbuffer = {}\nui_scale = {}\nautosave_minutes = {}\nmetronome = {}\ntyping_piano = {}\nmidi_input = {}\ninput_device = {}\nrecord_audio = {}\n",
             self.device.as_deref().unwrap_or(""),
             self.buffer.map(|b| b.to_string()).unwrap_or_default(),
             self.ui_scale,
@@ -61,6 +79,8 @@ impl Settings {
             self.metronome,
             self.typing_piano,
             self.midi_input,
+            self.input_device.as_deref().unwrap_or(""),
+            self.record_audio,
         )
     }
 
@@ -77,6 +97,8 @@ impl Settings {
                 "metronome" => s.metronome = v == "true",
                 "typing_piano" => s.typing_piano = v != "false",
                 "midi_input" if !v.is_empty() => s.midi_input = v.to_string(),
+                "input_device" => s.input_device = (!v.is_empty()).then(|| v.to_string()),
+                "record_audio" => s.record_audio = v == "true",
                 _ => {}
             }
         }
@@ -98,6 +120,8 @@ mod tests {
             metronome: true,
             typing_piano: false,
             midi_input: "USB Keys:USB Keys MIDI 1 20:0".into(),
+            input_device: Some("Mic".into()),
+            record_audio: true,
         };
         assert_eq!(Settings::from_text(&s.to_text()), s);
         assert_eq!(Settings::from_text(&Settings::default().to_text()), Settings::default());

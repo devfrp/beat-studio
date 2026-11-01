@@ -1,18 +1,24 @@
-// Main window: toolbar, browser, playlist. The editor windows live in editors.rs.
+// Main window: toolbar, menus, browser, playlist. The editor windows live in
+// editors.rs; undo, sound files, plugins and recording in tools.rs.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
 use eframe::egui::{self, pos2, vec2, Align2, Color32, FontId, Key, Pos2, Rect, Sense, Stroke, Ui};
 
+use crate::audiofile;
 use crate::engine::{
-    self, Clip, Instrument, Mode, Note, Project, Shared, BEATS_PER_BAR, PLAYLIST_TRACKS, STEPS_PER_BAR,
+    self, Automation, Clip, Instrument, Mode, Note, Project, SampleData, Shared, Target, BEATS_PER_BAR, PLAYLIST_TRACKS, STEPS_PER_BAR,
     TEMPO_MAX, TEMPO_MIN, TICKS_PER_BAR, TICKS_PER_STEP,
 };
 use crate::file;
 use crate::midi::{self, MidiEvent, MidiIn};
+use crate::plugin::PluginInfo;
+use crate::record::{self, Recorder, SharedRecorder};
 use crate::settings::{self, Settings};
+use crate::smf;
 use crate::widgets::*;
 
 /// Typing keyboard to piano, laid out like FL Studio: the bottom row starts at
@@ -62,26 +68,33 @@ fn shortcut_pressed(i: &egui::InputState, k: Key, piano: bool) -> bool {
     })
 }
 
-const BROWSER_FOLDERS: [&str; 18] = [
-    "Recent files",
-    "Plugin database",
-    "Plugin presets",
-    "Channel presets",
-    "Mixer presets",
-    "Scores",
-    "Clipboard files",
-    "Demo projects",
-    "Envelopes",
-    "Impulses",
-    "Misc",
-    "My projects",
-    "Project bones",
-    "Recorded",
-    "Rendered",
-    "Sliced audio",
-    "Soundfonts",
-    "Templates",
+#[derive(Clone, Copy, PartialEq)]
+enum Folder {
+    Plugins,
+    Recent,
+    Projects,
+    Templates,
+    Demos,
+    Samples,
+    Recorded,
+    Rendered,
+    Scores,
+}
+
+const BROWSER_FOLDERS: [(Folder, &str); 9] = [
+    (Folder::Plugins, "Plugin database"),
+    (Folder::Recent, "Recent files"),
+    (Folder::Projects, "My projects"),
+    (Folder::Templates, "Templates"),
+    (Folder::Demos, "Demo projects"),
+    (Folder::Samples, "Samples"),
+    (Folder::Recorded, "Recorded"),
+    (Folder::Rendered, "Rendered"),
+    (Folder::Scores, "Scores"),
 ];
+
+/// Height of an automation lane in the playlist.
+const AUTO_LANE_H: f32 = 46.0;
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum DragKind {
@@ -89,13 +102,15 @@ pub enum DragKind {
     Resize,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct PianoDrag {
     pub index: usize,
     pub kind: DragKind,
     pub grab_ticks: i64,
     pub grab_key: i32,
     pub orig: Note,
+    /// Selected notes moving together (index, where they started).
+    pub group: Vec<(usize, Note)>,
 }
 
 #[derive(Clone, Copy)]
@@ -108,7 +123,41 @@ struct ClipDrag {
 enum FileAction {
     Open,
     Save,
-    Export,
+    SaveTemplate,
+    ExportWav,
+    ExportMp3,
+    ExportMidi,
+}
+
+impl FileAction {
+    fn words(self) -> (&'static str, &'static str) {
+        match self {
+            FileAction::Open => ("Open project", "Open"),
+            FileAction::Save => ("Save project as", "Save"),
+            FileAction::SaveTemplate => ("Save as template", "Save"),
+            FileAction::ExportWav => ("Export to WAV", "Export"),
+            FileAction::ExportMp3 => ("Export to MP3", "Export"),
+            FileAction::ExportMidi => ("Export to MIDI", "Export"),
+        }
+    }
+
+    fn dir(self) -> PathBuf {
+        match self {
+            FileAction::Open | FileAction::Save => file::projects_dir(),
+            FileAction::SaveTemplate => file::folder(file::TEMPLATES),
+            FileAction::ExportWav | FileAction::ExportMp3 => file::folder(file::RENDERED),
+            FileAction::ExportMidi => file::folder(file::SCORES),
+        }
+    }
+
+    fn ext(self) -> &'static str {
+        match self {
+            FileAction::Open | FileAction::Save | FileAction::SaveTemplate => file::EXTENSION,
+            FileAction::ExportWav => "wav",
+            FileAction::ExportMp3 => "mp3",
+            FileAction::ExportMidi => "mid",
+        }
+    }
 }
 
 struct FileDialog {
@@ -117,10 +166,49 @@ struct FileDialog {
     error: Option<String>,
 }
 
+/// What a file chosen in the disk picker is for.
+#[derive(Clone, Copy, PartialEq)]
+pub enum PickFor {
+    NewSampler,
+    ReplaceSample(usize),
+    ImportMidi,
+}
+
+pub struct FilePicker {
+    pub purpose: PickFor,
+    pub dir: PathBuf,
+}
+
+/// Whose parameters the plugin window shows.
+#[derive(Clone, Copy, PartialEq)]
+pub enum PluginTarget {
+    Channel(usize),
+    Effect(usize, usize),
+}
+
+/// Where an audio take started.
+#[derive(Clone, Copy)]
+pub struct TakeStart {
+    pub position: f64,
+    pub mode: Mode,
+    pub pattern: usize,
+}
+
+/// Piano roll editing commands, from the keys or the EDIT menu.
+#[derive(Clone, Copy, PartialEq)]
+pub enum NoteAction {
+    SelectAll,
+    Copy,
+    Cut,
+    Paste,
+    Duplicate,
+    Delete,
+}
+
 pub struct StudioApp {
     shared: Shared,
     _stream: Option<cpal::Stream>,
-    screenshot: Option<PathBuf>,
+    pub screenshot: Option<PathBuf>,
     frames: u32,
     shot_requested: bool,
     pub show_browser: bool,
@@ -132,17 +220,29 @@ pub struct StudioApp {
     packs_open: bool,
     project_open: bool,
     browser_open: HashSet<&'static str>,
-    recording: bool,
+    pub recording: bool,
     pub typing_piano: bool,
     keys_down: HashMap<Key, (usize, u8)>,
     taps: Vec<f64>,
     pub selected_channel: usize,
     pub selected_insert: usize,
+    /// The effect slot shown under the slot list of the selected insert.
+    pub selected_slot: Option<usize>,
     pub paint: Option<bool>,
     pub piano_drag: Option<PianoDrag>,
     clip_drag: Option<ClipDrag>,
     pub last_note_len: u32,
     pub piano_scrolled: bool,
+    /// Selected notes (indices into the list of `note_sel_ctx` = (pattern, channel)).
+    pub note_sel: Vec<usize>,
+    pub note_sel_ctx: (usize, usize),
+    pub note_clipboard: Vec<Note>,
+    /// How many times the clipboard was pasted: each paste goes further right.
+    pub paste_count: u32,
+    /// Where a Ctrl+drag selection box started.
+    pub rubber: Option<Pos2>,
+    /// The piano roll was clicked last: its editing keys are active.
+    pub piano_focus: bool,
     pub hint: String,
     file_dialog: Option<FileDialog>,
     show_info: bool,
@@ -152,13 +252,14 @@ pub struct StudioApp {
     modified: bool,
     next_check: f64,
     shown_title: String,
-    settings: Settings,
+    pub settings: Settings,
     saved_settings: Settings,
     restart_audio: bool,
     show_audio: bool,
     show_general: bool,
     show_midi: bool,
     devices: Vec<String>,
+    inputs: Vec<String>,
     midi: Option<MidiIn>,
     midi_ports: Vec<String>,
     midi_down: HashMap<u8, (usize, u8)>,
@@ -166,6 +267,29 @@ pub struct StudioApp {
     next_midi_check: f64,
     last_autosave: f64,
     autosaved_text: String,
+    pub undo: Vec<String>,
+    pub redo: Vec<String>,
+    pub undo_last: String,
+    pub next_undo_check: f64,
+    pub samples: HashMap<PathBuf, Arc<SampleData>>,
+    pub sample_tx: Sender<(PathBuf, Result<SampleData, String>)>,
+    pub sample_rx: Receiver<(PathBuf, Result<SampleData, String>)>,
+    pub loading: HashSet<PathBuf>,
+    pub failed: HashSet<PathBuf>,
+    pub plugins: Vec<PluginInfo>,
+    pub plugin_scan: Option<Receiver<Vec<PluginInfo>>>,
+    pub plugin_window: Option<PluginTarget>,
+    pub plugin_filter: String,
+    /// Search text of the Browser's plugin list.
+    plugin_search: String,
+    pub picker: Option<FilePicker>,
+    pub recorder: SharedRecorder,
+    pub input_stream: Option<cpal::Stream>,
+    pub input_failed: bool,
+    pub take: Option<TakeStart>,
+    /// Automation point being dragged (clip, point).
+    pub auto_drag: Option<(usize, usize)>,
+    mp3_ok: bool,
 }
 
 impl StudioApp {
@@ -183,25 +307,18 @@ impl StudioApp {
         if let Ok(mut p) = shared.lock() {
             p.metronome = settings.metronome;
         }
-        // Developer check: open every window with a sample beat.
+        // Developer check: open every window with a demo song.
         let open_all = std::env::var_os("BEATSTUDIO_OPEN_ALL").is_some();
         if open_all {
             if let Ok(mut p) = shared.lock() {
-                for s in [0, 4, 8, 12] {
-                    p.patterns[0].set_step(0, s, true);
-                }
-                p.patterns[0].set_step(1, 4, true);
-                p.patterns[0].set_step(1, 12, true);
-                for s in (2..16).step_by(4) {
-                    p.patterns[0].set_step(2, s, true);
-                }
-                p.patterns[0].notes[4].push(Note { key: 64, start: 0, len: 96, vel: 100 });
-                p.clips.push(Clip { track: 0, start_bar: 0, pattern: 0 });
-                p.clips.push(Clip { track: 0, start_bar: 1, pattern: 0 });
+                let mut demo = file::demo(file::DEMOS[0]);
+                demo.metronome = p.metronome;
+                *p = demo;
             }
         }
         let saved_text = shared.lock().map(|p| file::to_text(&p)).unwrap_or_default();
-        StudioApp {
+        let (sample_tx, sample_rx) = channel();
+        let mut app = StudioApp {
             shared,
             _stream: stream,
             screenshot,
@@ -220,17 +337,25 @@ impl StudioApp {
             typing_piano: settings.typing_piano,
             keys_down: HashMap::new(),
             taps: Vec::new(),
-            selected_channel: 0,
-            selected_insert: 0,
+            selected_channel: if open_all { 4 } else { 0 },
+            selected_insert: if open_all { 5 } else { 0 },
+            selected_slot: open_all.then_some(1),
             paint: None,
             piano_drag: None,
             clip_drag: None,
             last_note_len: TICKS_PER_STEP * 2,
             piano_scrolled: false,
+            note_sel: Vec::new(),
+            note_sel_ctx: (0, 0),
+            note_clipboard: Vec::new(),
+            paste_count: 0,
+            rubber: None,
+            piano_focus: false,
             hint: "Ready".into(),
             file_dialog: None,
             show_info: false,
             current_file: None,
+            undo_last: saved_text.clone(),
             saved_text,
             modified: false,
             next_check: 0.0,
@@ -242,6 +367,7 @@ impl StudioApp {
             show_general: false,
             show_midi: false,
             devices: Vec::new(),
+            inputs: Vec::new(),
             midi: None,
             midi_ports: Vec::new(),
             midi_down: HashMap::new(),
@@ -249,7 +375,31 @@ impl StudioApp {
             next_midi_check: 0.0,
             last_autosave: 0.0,
             autosaved_text: String::new(),
+            undo: Vec::new(),
+            redo: Vec::new(),
+            next_undo_check: 0.0,
+            samples: HashMap::new(),
+            sample_tx,
+            sample_rx,
+            loading: HashSet::new(),
+            failed: HashSet::new(),
+            plugins: Vec::new(),
+            plugin_scan: None,
+            plugin_window: None,
+            plugin_filter: String::new(),
+            plugin_search: String::new(),
+            picker: None,
+            recorder: Arc::new(Mutex::new(Recorder::default())),
+            input_stream: None,
+            input_failed: false,
+            take: None,
+            auto_drag: None,
+            mp3_ok: audiofile::mp3_available(),
+        };
+        if app.screenshot.is_none() {
+            app.load_plugin_list();
         }
+        app
     }
 
     // ---------------------------------------------------------------- files
@@ -265,18 +415,29 @@ impl StudioApp {
         p.audio_ok = ok;
         p.metronome = metronome;
         self.selected_channel = 0;
-        self.piano_drag = None;
+        self.selected_insert = 0;
+        self.selected_slot = None;
         self.clip_drag = None;
+        self.after_project_change(p);
         self.saved_text = file::to_text(p);
         self.modified = false;
         self.current_file = file;
+        self.failed.clear();
+        self.reset_history(p);
     }
 
-    fn open_file(&mut self, p: &mut Project, path: PathBuf) -> Result<(), String> {
+    pub fn open_file(&mut self, p: &mut Project, path: PathBuf) -> Result<(), String> {
         let new = file::open(&path)?;
         self.hint = format!("Opened {}", file::display_name(&path));
         self.replace_project(p, new, Some(path));
         Ok(())
+    }
+
+    /// A template or demo starts a new, unsaved project.
+    fn start_from(&mut self, p: &mut Project, new: Project, what: &str) {
+        self.replace_project(p, new, None);
+        self.saved_text = String::new();
+        self.hint = format!("New project from {what}");
     }
 
     fn save_file(&mut self, p: &Project, path: PathBuf) -> Result<(), String> {
@@ -330,22 +491,20 @@ impl StudioApp {
 
     fn file_window(&mut self, ctx: &egui::Context, p: &mut Project) {
         let Some(mut d) = self.file_dialog.take() else { return };
-        let (title, verb) = match d.action {
-            FileAction::Open => ("Open project", "Open"),
-            FileAction::Save => ("Save project as", "Save"),
-            FileAction::Export => ("Export to WAV", "Export"),
-        };
+        let (title, verb) = d.action.words();
+        let dir = d.action.dir();
+        let ext = d.action.ext();
         let mut open = true;
         let mut done = false;
         egui::Window::new(title).open(&mut open).collapsible(false).resizable(false).default_width(340.0).show(ctx, |ui| {
-            ui.label(egui::RichText::new(format!("Folder: {}", file::projects_dir().display())).color(TEXT_DIM).size(11.0));
+            ui.label(egui::RichText::new(format!("Folder: {}", dir.display())).color(TEXT_DIM).size(11.0));
             ui.add_space(4.0);
-            let projects = file::list_projects();
+            let existing = file::list_files(&dir, &[ext]);
             egui::ScrollArea::vertical().max_height(180.0).show(ui, |ui| {
-                if projects.is_empty() {
-                    ui.label(egui::RichText::new("No projects saved yet").color(TEXT_DIM));
+                if existing.is_empty() {
+                    ui.label(egui::RichText::new("No files here yet").color(TEXT_DIM));
                 }
-                for path in &projects {
+                for path in &existing {
                     let name = file::display_name(path);
                     let r = file_item(ui, &name, name == d.name);
                     if r.clicked() {
@@ -367,20 +526,44 @@ impl StudioApp {
                 go |= r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
                 go |= ui.button(verb).clicked();
             });
+            if d.action == FileAction::ExportMidi {
+                let what = if p.mode == Mode::Song && !p.clips.is_empty() { "the song (playlist)" } else { "the current pattern" };
+                ui.label(egui::RichText::new(format!("Exports {what}.")).color(TEXT_DIM).size(11.0));
+            }
             if go && !done {
+                let path = file::path_in(&dir, &d.name, ext);
+                let exported = |secs: f32| format!("Exported {:.1} s to {}", secs, path.display());
                 let result = match d.action {
-                    FileAction::Open => self.open_file(p, file::path_for(&d.name, file::EXTENSION)),
-                    FileAction::Save => self.save_file(p, file::path_for(&d.name, file::EXTENSION)),
-                    FileAction::Export => {
-                        let path = file::path_for(&d.name, "wav");
-                        match file::export_wav(p, &path) {
-                            Ok(secs) => {
-                                self.hint = format!("Exported {:.1} s to {}", secs, path.display());
-                                Ok(())
-                            }
-                            Err(e) => Err(format!("Could not export: {e}")),
+                    FileAction::Open => self.open_file(p, path.clone()),
+                    FileAction::Save => self.save_file(p, path.clone()),
+                    FileAction::SaveTemplate => match file::save(p, &path) {
+                        Ok(()) => {
+                            self.hint = format!("Template saved: {}", d.name);
+                            Ok(())
                         }
-                    }
+                        Err(e) => Err(format!("Could not save: {e}")),
+                    },
+                    FileAction::ExportWav => match file::export_wav(p, &path) {
+                        Ok(secs) => {
+                            self.hint = exported(secs);
+                            Ok(())
+                        }
+                        Err(e) => Err(format!("Could not export: {e}")),
+                    },
+                    FileAction::ExportMp3 => match file::export_mp3(p, &path) {
+                        Ok(secs) => {
+                            self.hint = exported(secs);
+                            Ok(())
+                        }
+                        Err(e) => Err(format!("Could not export: {e}")),
+                    },
+                    FileAction::ExportMidi => match file::write_safely(&path, &smf::export(p)) {
+                        Ok(()) => {
+                            self.hint = format!("Exported MIDI to {}", path.display());
+                            Ok(())
+                        }
+                        Err(e) => Err(format!("Could not export: {e}")),
+                    },
                 };
                 match result {
                     Ok(()) => done = true,
@@ -419,6 +602,7 @@ impl StudioApp {
             return;
         }
         let mut open = true;
+        let input_peak = self.recorder.lock().map(|r| r.peak).unwrap_or(0.0);
         egui::Window::new("Audio settings").open(&mut open).collapsible(false).resizable(false).show(ctx, |ui| {
             egui::Grid::new("audio").num_columns(2).spacing(vec2(10.0, 6.0)).show(ui, |ui| {
                 ui.label("Output");
@@ -438,6 +622,7 @@ impl StudioApp {
                     });
                     if ui.small_button("Refresh").clicked() {
                         self.devices = engine::output_devices();
+                        self.inputs = record::input_devices();
                     }
                 });
                 ui.end_row();
@@ -470,6 +655,32 @@ impl StudioApp {
                     ui.colored_label(RED, "no sound output");
                 }
                 ui.end_row();
+
+                ui.label("Input");
+                let shown = self.settings.input_device.clone().unwrap_or_else(|| "System default".into());
+                let before = self.settings.input_device.clone();
+                egui::ComboBox::from_id_salt("input").selected_text(shown).width(240.0).show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.settings.input_device, None, "System default");
+                    for d in &self.inputs {
+                        ui.selectable_value(&mut self.settings.input_device, Some(d.clone()), d);
+                    }
+                });
+                if self.settings.input_device != before {
+                    self.input_stream = None;
+                    self.input_failed = false;
+                }
+                ui.end_row();
+
+                ui.label("Record audio");
+                ui.checkbox(&mut self.settings.record_audio, "the record button also records sound from the input");
+                ui.end_row();
+
+                if self.input_stream.is_some() {
+                    ui.label("Input level");
+                    let (rect, _) = ui.allocate_exact_size(vec2(200.0, 12.0), Sense::hover());
+                    meter_h(ui.painter(), rect, [input_peak; 2]);
+                    ui.end_row();
+                }
             });
             ui.label(egui::RichText::new("A smaller buffer reacts faster but may crackle.").color(TEXT_DIM).size(11.0));
         });
@@ -615,7 +826,10 @@ impl StudioApp {
             self.ask_file(FileAction::Open, p);
         }
         if export {
-            self.ask_file(FileAction::Export, p);
+            self.ask_file(FileAction::ExportWav, p);
+        }
+        if !ctx.wants_keyboard_input() && self.piano_focus && self.show_piano {
+            self.piano_keys(ctx, p);
         }
         if ctx.wants_keyboard_input() || ctx.input(|i| i.modifiers.command) {
             self.release_all_keys(p);
@@ -694,7 +908,7 @@ impl StudioApp {
         let ch = self.selected_channel.min(p.channels.len() - 1);
         let ahead = self.recording && p.record_note(ch, key, vel);
         if self.recording && p.mode == Mode::Song {
-            self.hint = "Recording works in pattern mode (PAT)".into();
+            self.hint = "Note recording works in pattern mode (PAT)".into();
         }
         if !ahead {
             p.held.push((ch, key, vel));
@@ -827,6 +1041,31 @@ impl StudioApp {
         }
     }
 
+    /// Right-click menu on a knob: automate it in the playlist.
+    pub fn automate_menu(&mut self, resp: &egui::Response, p: &mut Project, target: Target) {
+        resp.context_menu(|ui| {
+            let exists = p.automations.iter().any(|a| a.target == target);
+            let label = if exists { "Show automation clip" } else { "Create automation clip" };
+            if ui.button(label).clicked() {
+                self.create_automation(p, target);
+                ui.close_menu();
+            }
+        });
+    }
+
+    pub fn create_automation(&mut self, p: &mut Project, target: Target) {
+        self.show_playlist = true;
+        if p.automations.iter().any(|a| a.target == target) {
+            self.hint = format!("{} is already automated - see the top of the playlist", target.label(p));
+            return;
+        }
+        let (lo, hi) = target.range();
+        let v = target.base_value(p).unwrap_or(hi).clamp(lo, hi);
+        let end = p.song_length_ticks().max(4 * TICKS_PER_BAR);
+        p.automations.push(Automation { target, points: vec![(0, v), (end, v)] });
+        self.hint = format!("Automation for {}: click its lane in the playlist to add points (song mode)", target.label(p));
+    }
+
     // ---------------------------------------------------------------- top bar
 
     fn top_bar(&mut self, ctx: &egui::Context, p: &mut Project) {
@@ -847,12 +1086,82 @@ impl StudioApp {
             });
     }
 
+    pub fn instrument_plugin_menu(&mut self, ui: &mut Ui, p: &mut Project, replace: Option<usize>) {
+        let list: Vec<PluginInfo> = self.plugins.iter().filter(|i| i.instrument).cloned().collect();
+        if list.is_empty() {
+            let msg = if self.plugin_scan.is_some() { "Looking for plugins..." } else { "No CLAP instruments found" };
+            ui.label(egui::RichText::new(msg).color(TEXT_DIM));
+        }
+        egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
+            for info in list {
+                if ui.button(&info.name).on_hover_text(&info.vendor).clicked() {
+                    self.add_plugin_instrument(p, &info, replace);
+                    ui.close_menu();
+                }
+            }
+        });
+    }
+
+    pub fn effect_plugin_menu(&mut self, ui: &mut Ui, p: &mut Project, insert: usize, slot: usize) {
+        let list: Vec<PluginInfo> = self.plugins.iter().filter(|i| !i.instrument).cloned().collect();
+        if list.is_empty() {
+            let msg = if self.plugin_scan.is_some() { "Looking for plugins..." } else { "No CLAP effects found" };
+            ui.label(egui::RichText::new(msg).color(TEXT_DIM));
+        }
+        egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
+            for info in list {
+                if ui.button(&info.name).on_hover_text(&info.vendor).clicked() {
+                    self.add_plugin_effect(p, &info, insert, slot);
+                    ui.close_menu();
+                }
+            }
+        });
+    }
+
+    pub fn add_channel_menu(&mut self, ui: &mut Ui, p: &mut Project) {
+        for inst in Instrument::ALL {
+            if ui.button(inst.label()).clicked() {
+                p.add_channel(inst);
+                self.selected_channel = p.channels.len() - 1;
+                ui.close_menu();
+            }
+        }
+        ui.separator();
+        if ui.button("Sampler (sound file)...").clicked() {
+            self.pick(PickFor::NewSampler);
+            ui.close_menu();
+        }
+        ui.menu_button("Plugin instrument", |ui| self.instrument_plugin_menu(ui, p, None));
+    }
+
     fn menus(&mut self, ui: &mut Ui, p: &mut Project) {
         ui.menu_button("FILE", |ui| {
             if ui.button("New").clicked() {
                 self.replace_project(p, Project::new(), None);
                 ui.close_menu();
             }
+            ui.menu_button("New from template", |ui| {
+                let templates = file::list_files(&file::folder(file::TEMPLATES), &[file::EXTENSION]);
+                if templates.is_empty() {
+                    ui.label(egui::RichText::new("No templates yet: use \"Save as template\"").color(TEXT_DIM));
+                }
+                for path in templates {
+                    if ui.button(file::display_name(&path)).clicked() {
+                        match file::open(&path) {
+                            Ok(new) => self.start_from(p, new, &file::display_name(&path)),
+                            Err(e) => self.hint = e,
+                        }
+                        ui.close_menu();
+                    }
+                }
+                ui.separator();
+                for name in file::DEMOS {
+                    if ui.button(format!("Demo: {name}")).clicked() {
+                        self.start_from(p, file::demo(name), name);
+                        ui.close_menu();
+                    }
+                }
+            });
             if ui.button("Open...   Ctrl+O").clicked() {
                 self.ask_file(FileAction::Open, p);
                 ui.close_menu();
@@ -879,10 +1188,36 @@ impl StudioApp {
                 self.ask_file(FileAction::Save, p);
                 ui.close_menu();
             }
-            if ui.button("Export to WAV...   Ctrl+R").clicked() {
-                self.ask_file(FileAction::Export, p);
+            if ui.button("Save as template...").clicked() {
+                self.ask_file(FileAction::SaveTemplate, p);
                 ui.close_menu();
             }
+            ui.separator();
+            ui.menu_button("Import", |ui| {
+                if ui.button("Sound file (new sampler channel)...").clicked() {
+                    self.pick(PickFor::NewSampler);
+                    ui.close_menu();
+                }
+                if ui.button("MIDI file (new pattern)...").clicked() {
+                    self.pick(PickFor::ImportMidi);
+                    ui.close_menu();
+                }
+            });
+            ui.menu_button("Export", |ui| {
+                if ui.button("WAV file...   Ctrl+R").clicked() {
+                    self.ask_file(FileAction::ExportWav, p);
+                    ui.close_menu();
+                }
+                let mp3 = ui.add_enabled(self.mp3_ok, egui::Button::new("MP3 file..."));
+                if mp3.on_disabled_hover_text("Needs the LAME library (package \"lame\")").clicked() {
+                    self.ask_file(FileAction::ExportMp3, p);
+                    ui.close_menu();
+                }
+                if ui.button("MIDI file...").clicked() {
+                    self.ask_file(FileAction::ExportMidi, p);
+                    ui.close_menu();
+                }
+            });
             if ui.button("Project info...").clicked() {
                 self.show_info = true;
                 ui.close_menu();
@@ -896,20 +1231,36 @@ impl StudioApp {
             }
         });
         ui.menu_button("EDIT", |ui| {
+            if ui.add_enabled(!self.undo.is_empty(), egui::Button::new("Undo   Ctrl+Z")).clicked() {
+                self.undo_step(p, true);
+                ui.close_menu();
+            }
+            if ui.add_enabled(!self.redo.is_empty(), egui::Button::new("Redo   Ctrl+Y")).clicked() {
+                self.undo_step(p, false);
+                ui.close_menu();
+            }
+            ui.separator();
+            ui.label(egui::RichText::new("Piano roll").color(TEXT_DIM).size(11.0));
+            for (label, action) in [
+                ("Select all   Ctrl+A", NoteAction::SelectAll),
+                ("Copy   Ctrl+C", NoteAction::Copy),
+                ("Cut   Ctrl+X", NoteAction::Cut),
+                ("Paste   Ctrl+V", NoteAction::Paste),
+                ("Duplicate   Ctrl+B", NoteAction::Duplicate),
+                ("Delete   Del", NoteAction::Delete),
+            ] {
+                if ui.button(label).clicked() {
+                    self.note_action(p, action);
+                    ui.close_menu();
+                }
+            }
+            ui.separator();
             if ui.button("Clear playlist").clicked() {
                 p.clips.clear();
                 ui.close_menu();
             }
         });
-        ui.menu_button("ADD", |ui| {
-            for inst in Instrument::ALL {
-                if ui.button(inst.label()).clicked() {
-                    p.add_channel(inst);
-                    self.selected_channel = p.channels.len() - 1;
-                    ui.close_menu();
-                }
-            }
-        });
+        ui.menu_button("ADD", |ui| self.add_channel_menu(ui, p));
         ui.menu_button("PATTERNS", |ui| {
             if ui.button("New pattern").clicked() {
                 let n = p.patterns.len();
@@ -924,6 +1275,11 @@ impl StudioApp {
                 p.current_pattern = p.patterns.len() - 1;
                 ui.close_menu();
             }
+            ui.horizontal(|ui| {
+                ui.label("Name");
+                let cur = p.current_pattern;
+                ui.text_edit_singleline(&mut p.patterns[cur].name);
+            });
         });
         ui.menu_button("VIEW", |ui| {
             ui.checkbox(&mut self.show_playlist, "Playlist   F5");
@@ -937,10 +1293,12 @@ impl StudioApp {
             if ui.checkbox(&mut self.typing_piano, "Typing keyboard to piano").changed() && !self.typing_piano {
                 self.release_all_keys(p);
             }
+            ui.checkbox(&mut self.settings.record_audio, "Record audio from the input");
             ui.separator();
             if ui.button("Audio settings...").clicked() {
                 self.show_audio = true;
                 self.devices = engine::output_devices();
+                self.inputs = record::input_devices();
                 ui.close_menu();
             }
             if ui.button("MIDI settings...").clicked() {
@@ -952,6 +1310,11 @@ impl StudioApp {
                 self.show_general = true;
                 ui.close_menu();
             }
+            ui.separator();
+            if ui.button("Rescan plugins").clicked() {
+                self.start_plugin_scan();
+                ui.close_menu();
+            }
         });
         ui.menu_button("TOOLS", |ui| {
             if ui.button("Fill every 4 steps").clicked() {
@@ -961,6 +1324,26 @@ impl StudioApp {
                 }
                 ui.close_menu();
             }
+            ui.menu_button("Automate", |ui| {
+                if ui.button("Tempo").clicked() {
+                    self.create_automation(p, Target::Tempo);
+                    ui.close_menu();
+                }
+                if ui.button("Master volume").clicked() {
+                    self.create_automation(p, Target::MixerVolume(0));
+                    ui.close_menu();
+                }
+                let ch = self.selected_channel.min(p.channels.len() - 1);
+                if ui.button(format!("{} volume", p.channels[ch].name)).clicked() {
+                    self.create_automation(p, Target::ChannelVolume(ch));
+                    ui.close_menu();
+                }
+                if ui.button(format!("{} pan", p.channels[ch].name)).clicked() {
+                    self.create_automation(p, Target::ChannelPan(ch));
+                    ui.close_menu();
+                }
+                ui.label(egui::RichText::new("or right-click any knob").color(TEXT_DIM).size(10.0));
+            });
         });
         ui.menu_button("HELP", |ui| {
             if ui.button("About").clicked() {
@@ -991,20 +1374,46 @@ impl StudioApp {
             p.stop();
         }
         let rec = big_button(ui, "record", Some(if self.recording { RED } else { Color32::from_rgb(0xB0, 0x60, 0x5C) }));
-        let rec_tip = "Record: notes played on the typing keyboard are added to the pattern while it plays";
-        if rec.on_hover_text(rec_tip).clicked() {
+        let rec_tip = if self.settings.record_audio {
+            "Record: notes from the keyboards, and sound from the input (right-click for options)"
+        } else {
+            "Record: notes from the keyboards go into the pattern while it plays (right-click for options)"
+        };
+        let rec = rec.on_hover_text(rec_tip);
+        if rec.clicked() {
             self.recording = !self.recording;
-            self.hint = if self.recording { "Recording armed: press play, then play notes on the keyboard".into() } else { "Recording off".into() };
+            self.hint = match (self.recording, self.settings.record_audio) {
+                (true, true) => "Recording armed: press play to record notes and sound".into(),
+                (true, false) => "Recording armed: press play, then play notes on the keyboard".into(),
+                (false, _) => "Recording off".into(),
+            };
         }
+        rec.context_menu(|ui| {
+            ui.label(egui::RichText::new("Notes are always recorded").color(TEXT_DIM));
+            ui.checkbox(&mut self.settings.record_audio, "Also record audio from the input");
+            if ui.button("Audio settings...").clicked() {
+                self.show_audio = true;
+                self.devices = engine::output_devices();
+                self.inputs = record::input_devices();
+                ui.close_menu();
+            }
+        });
         if led_button(ui, "METRO", p.metronome).on_hover_text("Metronome (Ctrl+M)").clicked() {
             p.metronome = !p.metronome;
         }
 
+        let automated = p.mode == Mode::Song && p.automations.iter().any(|a| a.target == Target::Tempo);
         lcd(ui, |ui| {
-            let r = ui.add(egui::DragValue::new(&mut p.tempo).range(TEMPO_MIN..=TEMPO_MAX).speed(0.2).fixed_decimals(3));
-            p.tempo = engine::quantize_tempo(p.tempo);
-            if r.hovered() {
-                self.hint = "Tempo in beats per minute - drag up/down or double-click to type".into();
+            if automated {
+                ui.label(egui::RichText::new(format!("{:.3}", p.live_tempo())).color(ACCENT))
+                    .on_hover_text("The tempo follows its automation clip in song mode");
+            } else {
+                let r = ui.add(egui::DragValue::new(&mut p.tempo).range(TEMPO_MIN..=TEMPO_MAX).speed(0.2).fixed_decimals(3));
+                p.tempo = engine::quantize_tempo(p.tempo);
+                if r.hovered() {
+                    self.hint = "Tempo in beats per minute - drag up/down or double-click to type".into();
+                }
+                self.automate_menu(&r, p, Target::Tempo);
             }
             ui.label(egui::RichText::new("BPM").color(TEXT_DIM).size(9.0));
         });
@@ -1049,10 +1458,12 @@ impl StudioApp {
 
         ui.label(egui::RichText::new("MAIN").color(TEXT_DIM).size(10.0));
         let mut mv = p.mixer[0].volume;
-        if knob(ui, &mut mv, 0.0, engine::FADER_MAX, engine::FADER_DEFAULT, 26.0).hovered() {
+        let r = knob(ui, &mut mv, 0.0, engine::FADER_MAX, engine::FADER_DEFAULT, 26.0);
+        if r.hovered() {
             self.hint = format!("Main volume {:.1} dB", 20.0 * (mv.max(1.0) / engine::VOL_SCALE).log10());
         }
         p.mixer[0].volume = mv;
+        self.automate_menu(&r, p, Target::MixerVolume(0));
         let peak = p.mixer[0].peak;
         let (rect, _) = ui.allocate_exact_size(vec2(60.0, 22.0), Sense::hover());
         meter_h(ui.painter(), rect, peak);
@@ -1081,7 +1492,7 @@ impl StudioApp {
         egui::SidePanel::left("browser")
             .resizable(true)
             .default_width(196.0)
-            .frame(egui::Frame::none().fill(PANEL_DARK).inner_margin(6.0).stroke(Stroke::new(1.0, LINE)))
+            .frame(egui::Frame::none().fill(PANEL_DARK).inner_margin(6.0).stroke(Stroke::new(1.0_f32, LINE)))
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new("Browser").color(TEXT).strong());
@@ -1110,6 +1521,12 @@ impl StudioApp {
                                     p.previews.push((i, engine::STEP_KEY));
                                 }
                             }
+                            if !p.automations.is_empty() {
+                                ui.label(egui::RichText::new("Automation").color(TEXT_DIM).size(11.0));
+                                for a in &p.automations {
+                                    file_item(ui, &a.target.label(p), false).on_hover_text("Shown at the top of the playlist");
+                                }
+                            }
                         });
                     }
                     if folder(ui, "Packs", self.packs_open).clicked() {
@@ -1125,44 +1542,110 @@ impl StudioApp {
                                     p.previews.push((self.selected_channel, engine::STEP_KEY));
                                 }
                             }
+                            if file_item(ui, "Sound file from disk...", false).clicked() {
+                                self.pick(PickFor::NewSampler);
+                            }
                         });
                     }
-                    for name in BROWSER_FOLDERS {
-                        let lists_projects = name == "My projects" || name == "Recent files";
+                    for (kind, name) in BROWSER_FOLDERS {
                         let open = self.browser_open.contains(name);
-                        if folder(ui, name, open).clicked() {
-                            if lists_projects {
-                                if !self.browser_open.remove(name) {
-                                    self.browser_open.insert(name);
-                                }
-                            } else {
-                                self.hint = format!("{name}: nothing here yet");
-                            }
+                        if folder(ui, name, open).clicked() && !self.browser_open.remove(name) {
+                            self.browser_open.insert(name);
                         }
                         if open {
-                            let mut projects = file::list_projects();
-                            if name == "My projects" {
-                                projects.sort_by_key(|f| file::display_name(f).to_lowercase());
-                            } else {
-                                projects.truncate(10);
-                            }
-                            ui.indent(name, |ui| {
-                                if projects.is_empty() {
-                                    ui.label(egui::RichText::new("no saved projects").color(TEXT_DIM).size(10.0));
-                                }
-                                for path in projects {
-                                    let sel = self.current_file.as_ref() == Some(&path);
-                                    if file_item(ui, &file::display_name(&path), sel).on_hover_text("Click to open").clicked() {
-                                        if let Err(e) = self.open_file(p, path) {
-                                            self.hint = e;
-                                        }
-                                    }
-                                }
-                            });
+                            ui.indent(name, |ui| self.browser_folder(ui, p, kind));
                         }
                     }
                 });
             });
+    }
+
+    fn browser_folder(&mut self, ui: &mut Ui, p: &mut Project, kind: Folder) {
+        let dim = |ui: &mut Ui, t: &str| {
+            ui.label(egui::RichText::new(t).color(TEXT_DIM).size(10.0));
+        };
+        let (dir, exts, empty): (PathBuf, Vec<&str>, &str) = match kind {
+            Folder::Plugins => {
+                if self.plugin_scan.is_some() {
+                    dim(ui, "looking for plugins...");
+                } else if self.plugins.is_empty() {
+                    dim(ui, "no CLAP plugins found (~/.clap, /usr/lib/clap)");
+                }
+                if self.plugins.len() > 12 {
+                    ui.add(egui::TextEdit::singleline(&mut self.plugin_search).hint_text("search plugins").desired_width(150.0));
+                }
+                let needle = self.plugin_search.to_lowercase();
+                let list: Vec<PluginInfo> =
+                    self.plugins.iter().filter(|i| needle.is_empty() || i.name.to_lowercase().contains(&needle) || i.vendor.to_lowercase().contains(&needle)).cloned().collect();
+                for (title, inst) in [("Instruments - click to add a channel", true), ("Effects - click to add to the selected insert", false)] {
+                    if list.iter().any(|i| i.instrument == inst) {
+                        dim(ui, title);
+                    }
+                    for info in list.iter().filter(|i| i.instrument == inst) {
+                        if file_item(ui, &info.name, false).on_hover_text(&info.vendor).clicked() {
+                            if inst {
+                                self.add_plugin_instrument(p, info, None);
+                            } else {
+                                let insert = self.selected_insert;
+                                match Self::free_slot(p, insert) {
+                                    Some(slot) => {
+                                        self.add_plugin_effect(p, info, insert, slot);
+                                        self.show_mixer = true;
+                                    }
+                                    None => self.hint = format!("{} has no free effect slot", p.mixer[insert].name),
+                                }
+                            }
+                        }
+                    }
+                }
+                if ui.small_button("Rescan").clicked() {
+                    self.start_plugin_scan();
+                }
+                return;
+            }
+            Folder::Demos => {
+                for name in file::DEMOS {
+                    if file_item(ui, name, false).on_hover_text("Click to open as a new project").clicked() {
+                        self.start_from(p, file::demo(name), name);
+                    }
+                }
+                return;
+            }
+            Folder::Recent | Folder::Projects => (file::projects_dir(), vec![file::EXTENSION], "no saved projects"),
+            Folder::Templates => (file::folder(file::TEMPLATES), vec![file::EXTENSION], "FILE > Save as template adds one"),
+            Folder::Samples => (file::folder(file::SAMPLES), audiofile::AUDIO_EXTENSIONS.to_vec(), "put sound files here, or drop them on the window"),
+            Folder::Recorded => (file::folder(file::RECORDED), vec!["wav"], "audio takes appear here"),
+            Folder::Rendered => (file::folder(file::RENDERED), vec!["wav", "mp3"], "exported songs appear here"),
+            Folder::Scores => (file::folder(file::SCORES), vec!["mid", "midi"], "MIDI files to import"),
+        };
+        let mut files = file::list_files(&dir, &exts);
+        match kind {
+            Folder::Projects => files.sort_by_key(|f| file::display_name(f).to_lowercase()),
+            Folder::Recent => files.truncate(10),
+            _ => {}
+        }
+        if files.is_empty() {
+            dim(ui, empty);
+        }
+        for path in files {
+            let sel = self.current_file.as_ref() == Some(&path);
+            let tip = match kind {
+                Folder::Templates => "Click to start a new project from it",
+                Folder::Recent | Folder::Projects => "Click to open",
+                Folder::Scores => "Click to import into a new pattern",
+                _ => "Click to add as a sampler channel",
+            };
+            if file_item(ui, &file::display_name(&path), sel).on_hover_text(tip).clicked() {
+                if kind == Folder::Templates {
+                    match file::open(&path) {
+                        Ok(new) => self.start_from(p, new, &file::display_name(&path)),
+                        Err(e) => self.hint = e,
+                    }
+                } else {
+                    self.open_any(p, path);
+                }
+            }
+        }
     }
 
     // ---------------------------------------------------------------- playlist
@@ -1173,8 +1656,8 @@ impl StudioApp {
             gradient(ui.painter(), full, BG_TOP, BG_BOTTOM);
             if self.show_playlist {
                 let inner = full.shrink(6.0);
-                let mut child = ui.child_ui(inner, egui::Layout::top_down(egui::Align::Min), None);
-                egui::Frame::none().fill(PANEL).stroke(Stroke::new(1.0, LINE)).rounding(3.0).show(&mut child, |ui| {
+                let mut child = ui.new_child(egui::UiBuilder::new().max_rect(inner).layout(egui::Layout::top_down(egui::Align::Min)));
+                egui::Frame::none().fill(PANEL).stroke(Stroke::new(1.0_f32, LINE)).rounding(3.0).show(&mut child, |ui| {
                     ui.set_min_size(inner.size());
                     self.playlist(ui, p);
                 });
@@ -1189,6 +1672,24 @@ impl StudioApp {
                 ui.label(egui::RichText::new("Playlist").color(TEXT).strong());
                 ui.label(egui::RichText::new("- Arrangement").color(TEXT_DIM));
                 ui.label(egui::RichText::new(format!("›  {}", p.patterns[p.current_pattern].name)).color(ACCENT));
+                ui.add_space(12.0);
+                ui.menu_button("+ automation", |ui| {
+                    if ui.button("Tempo").clicked() {
+                        self.create_automation(p, Target::Tempo);
+                        ui.close_menu();
+                    }
+                    if ui.button("Master volume").clicked() {
+                        self.create_automation(p, Target::MixerVolume(0));
+                        ui.close_menu();
+                    }
+                    for c in 0..p.channels.len() {
+                        if ui.button(format!("{} volume", p.channels[c].name)).clicked() {
+                            self.create_automation(p, Target::ChannelVolume(c));
+                            ui.close_menu();
+                        }
+                    }
+                    ui.label(egui::RichText::new("or right-click any knob").color(TEXT_DIM).size(10.0));
+                });
             });
         });
 
@@ -1211,7 +1712,7 @@ impl StudioApp {
         }
 
         let area = Rect::from_min_max(pos2(picker.right(), avail.top()), avail.max);
-        let mut child = ui.child_ui(area, egui::Layout::top_down(egui::Align::Min), None);
+        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(area).layout(egui::Layout::top_down(egui::Align::Min)));
         egui::ScrollArea::both().auto_shrink([false, false]).show(&mut child, |ui| self.arrangement(ui, p));
     }
 
@@ -1221,10 +1722,15 @@ impl StudioApp {
         let head_w = 86.0;
         let ruler_h = 20.0;
         let bars = (p.song_length_ticks().div_ceil(TICKS_PER_BAR) + 16).max(64);
-        let total = vec2(head_w + bars as f32 * bar_w, ruler_h + PLAYLIST_TRACKS as f32 * row_h);
+        let tracks_h = PLAYLIST_TRACKS as f32 * row_h;
+        let autos_h = p.automations.len() as f32 * AUTO_LANE_H;
+        let total = vec2(head_w + bars as f32 * bar_w, ruler_h + tracks_h + autos_h);
         let (rect, _) = ui.allocate_exact_size(total, Sense::hover());
         let painter = ui.painter_at(ui.clip_rect());
-        let grid = Rect::from_min_max(pos2(rect.left() + head_w, rect.top() + ruler_h), rect.max);
+        // Automation lanes sit between the ruler and the tracks.
+        let autos_top = rect.top() + ruler_h;
+        let grid = Rect::from_min_max(pos2(rect.left() + head_w, autos_top + autos_h), pos2(rect.right(), autos_top + autos_h + tracks_h));
+        let tick_x = |t: f32| grid.left() + t / TICKS_PER_BAR as f32 * bar_w;
 
         for t in 0..PLAYLIST_TRACKS {
             let y0 = grid.top() + t as f32 * row_h;
@@ -1233,21 +1739,21 @@ impl StudioApp {
         }
         for b in 0..=bars {
             let x = grid.left() + b as f32 * bar_w;
-            painter.line_segment([pos2(x, grid.top()), pos2(x, grid.bottom())], Stroke::new(1.0, LINE));
+            painter.line_segment([pos2(x, grid.top()), pos2(x, grid.bottom())], Stroke::new(1.0_f32, LINE));
             if b < bars {
                 for q in 1..BEATS_PER_BAR {
                     let xq = x + q as f32 * bar_w / BEATS_PER_BAR as f32;
-                    painter.line_segment([pos2(xq, grid.top()), pos2(xq, grid.bottom())], Stroke::new(1.0, LINE_FAINT));
+                    painter.line_segment([pos2(xq, grid.top()), pos2(xq, grid.bottom())], Stroke::new(1.0_f32, LINE_FAINT));
                 }
             }
         }
         for t in 0..=PLAYLIST_TRACKS {
             let y = grid.top() + t as f32 * row_h;
-            painter.line_segment([pos2(grid.left(), y), pos2(grid.right(), y)], Stroke::new(1.0, LINE));
+            painter.line_segment([pos2(grid.left(), y), pos2(grid.right(), y)], Stroke::new(1.0_f32, LINE));
         }
 
         // Ruler: click to move the song position.
-        let ruler = Rect::from_min_max(pos2(grid.left(), rect.top()), pos2(grid.right(), grid.top()));
+        let ruler = Rect::from_min_max(pos2(grid.left(), rect.top()), pos2(grid.right(), autos_top));
         painter.rect_filled(ruler, 0.0, PANEL_DARK);
         for b in 0..bars {
             let x = grid.left() + b as f32 * bar_w;
@@ -1291,17 +1797,114 @@ impl StudioApp {
             }
         }
 
-        // Track headers stay pinned on the left while scrolling.
+        // Automation lanes.
         let vis = ui.clip_rect();
+        let mut remove_auto: Option<usize> = None;
+        for ai in 0..p.automations.len() {
+            let y0 = autos_top + ai as f32 * AUTO_LANE_H;
+            let lane = Rect::from_min_max(pos2(grid.left(), y0), pos2(grid.right(), y0 + AUTO_LANE_H));
+            painter.rect_filled(lane, 0.0, PANEL_DEEP);
+            painter.line_segment([lane.left_bottom(), lane.right_bottom()], Stroke::new(1.0_f32, LINE));
+            for b in (0..=bars).step_by(4) {
+                let x = grid.left() + b as f32 * bar_w;
+                painter.line_segment([pos2(x, lane.top()), pos2(x, lane.bottom())], Stroke::new(1.0_f32, LINE_FAINT));
+            }
+            let target = p.automations[ai].target;
+            let (lo, hi) = target.range();
+            let val_y = |v: f32| lane.bottom() - 4.0 - (v - lo) / (hi - lo) * (AUTO_LANE_H - 8.0);
+            let y_val = |y: f32| (lo + (lane.bottom() - 4.0 - y) / (AUTO_LANE_H - 8.0) * (hi - lo)).clamp(lo, hi);
+            let col = Color32::from_rgb(0xA0, 0xC8, 0xF0);
+            let pts: Vec<Pos2> = p.automations[ai].points.iter().map(|&(t, v)| pos2(tick_x(t as f32), val_y(v))).collect();
+            if let (Some(first), Some(last)) = (pts.first(), pts.last()) {
+                let mut line = vec![pos2(lane.left(), first.y)];
+                line.extend(pts.iter().copied());
+                line.push(pos2(lane.right(), last.y));
+                painter.add(egui::Shape::line(line, Stroke::new(1.5_f32, col)));
+            }
+            let lane_hit = Rect::from_min_max(pos2(vis.left() + head_w, lane.top()), lane.max);
+            let lr = ui.interact(lane_hit, ui.id().with(("auto", ai)), Sense::click_and_drag());
+            let near = lr.hover_pos().or(lr.interact_pointer_pos()).and_then(|hp| pts.iter().position(|q| q.distance(hp) < 7.0));
+            for (k, q) in pts.iter().enumerate() {
+                let lit = near == Some(k) || self.auto_drag == Some((ai, k));
+                painter.circle_filled(*q, if lit { 5.0 } else { 3.5 }, if lit { ACCENT } else { col });
+            }
+            let snap = |x: f32| {
+                let t = ((x - grid.left()) / bar_w * TICKS_PER_BAR as f32).max(0.0);
+                ((t / TICKS_PER_STEP as f32).round() as u32) * TICKS_PER_STEP
+            };
+            if lr.drag_started_by(egui::PointerButton::Primary) {
+                if let Some(k) = near {
+                    self.auto_drag = Some((ai, k));
+                } else if let Some(pp) = lr.interact_pointer_pos() {
+                    let t = snap(pp.x);
+                    p.automations[ai].points.push((t, y_val(pp.y)));
+                    p.automations[ai].sort();
+                    self.auto_drag = p.automations[ai].points.iter().position(|q| q.0 == t).map(|k| (ai, k));
+                }
+            }
+            if let (Some((da, dk)), Some(pp)) = (self.auto_drag, lr.interact_pointer_pos()) {
+                if da == ai && lr.dragged() && dk < p.automations[ai].points.len() {
+                    let pts = &p.automations[ai].points;
+                    // A point stays between its neighbours.
+                    let min = if dk > 0 { pts[dk - 1].0 } else { 0 };
+                    let max = pts.get(dk + 1).map_or(u32::MAX, |q| q.0);
+                    p.automations[ai].points[dk] = (snap(pp.x).clamp(min, max), y_val(pp.y));
+                }
+            }
+            if lr.drag_stopped() {
+                self.auto_drag = None;
+            }
+            if lr.clicked() && near.is_none() {
+                if let Some(pp) = lr.interact_pointer_pos() {
+                    p.automations[ai].points.push((snap(pp.x), y_val(pp.y)));
+                    p.automations[ai].sort();
+                }
+            }
+            if lr.secondary_clicked() {
+                if let Some(k) = near {
+                    p.automations[ai].points.remove(k);
+                }
+            }
+            if lr.hovered() {
+                self.hint = match near {
+                    Some(k) => {
+                        let v = p.automations[ai].points[k].1;
+                        format!("{}: {v:.2} - drag to move, right-click to delete", target.label(p))
+                    }
+                    None => format!("{}: click to add a point (plays in song mode)", target.label(p)),
+                };
+            }
+            // Header pinned on the left like the track names.
+            let head = Rect::from_min_max(pos2(vis.left(), y0), pos2(vis.left() + head_w, y0 + AUTO_LANE_H));
+            painter.rect_filled(head, 0.0, HEADER);
+            painter.line_segment([head.left_bottom(), head.right_bottom()], Stroke::new(1.0_f32, LINE));
+            painter.text(head.left_top() + vec2(6.0, 6.0), Align2::LEFT_TOP, "Automation", FontId::proportional(9.0), TEXT_DIM);
+            let label = target.label(p);
+            let galley = painter.layout(label, FontId::proportional(10.0), col, head_w - 10.0);
+            painter.galley(head.left_top() + vec2(6.0, 18.0), galley, col);
+            let hr = ui.interact(head, ui.id().with(("auto_head", ai)), Sense::click());
+            hr.on_hover_text("Right-click to delete this automation clip").context_menu(|ui| {
+                if ui.button("Delete automation clip").clicked() {
+                    remove_auto = Some(ai);
+                    ui.close_menu();
+                }
+            });
+        }
+        if let Some(ai) = remove_auto {
+            p.automations.remove(ai);
+            self.auto_drag = None;
+        }
+
+        // Track headers stay pinned on the left while scrolling.
         let heads = Rect::from_min_max(pos2(vis.left(), grid.top()), pos2(vis.left() + head_w, grid.bottom()));
         painter.rect_filled(heads, 0.0, HEADER);
         for t in 0..PLAYLIST_TRACKS {
             let y0 = grid.top() + t as f32 * row_h;
-            painter.line_segment([pos2(heads.left(), y0), pos2(heads.right(), y0)], Stroke::new(1.0, LINE));
+            painter.line_segment([pos2(heads.left(), y0), pos2(heads.right(), y0)], Stroke::new(1.0_f32, LINE));
             painter.circle_filled(pos2(heads.left() + 10.0, y0 + row_h / 2.0), 3.5, LED_ON);
             painter.text(pos2(heads.left() + 20.0, y0 + row_h / 2.0), Align2::LEFT_CENTER, format!("Track {}", t + 1), FontId::proportional(11.0), TEXT);
         }
-        painter.rect_filled(Rect::from_min_max(pos2(vis.left(), rect.top()), pos2(vis.left() + head_w, grid.top())), 0.0, PANEL_DARK);
+        painter.rect_filled(Rect::from_min_max(pos2(vis.left(), rect.top()), pos2(vis.left() + head_w, autos_top)), 0.0, PANEL_DARK);
 
         let gr = ui.interact(Rect::from_min_max(pos2(vis.left() + head_w, grid.top()), grid.max), ui.id().with("grid"), Sense::click_and_drag());
         let cell = |pp: Pos2| {
@@ -1332,6 +1935,7 @@ impl StudioApp {
             self.clip_drag = None;
         }
         if gr.clicked() {
+            self.piano_focus = false;
             if let Some(pp) = gr.interact_pointer_pos() {
                 match hit {
                     Some(ci) => p.current_pattern = p.clips[ci].pattern,
@@ -1348,7 +1952,7 @@ impl StudioApp {
 
         if p.mode == Mode::Song {
             let x = grid.left() + p.position as f32 / TICKS_PER_BAR as f32 * bar_w;
-            painter.line_segment([pos2(x, rect.top()), pos2(x, grid.bottom())], Stroke::new(1.5, ACCENT));
+            painter.line_segment([pos2(x, rect.top()), pos2(x, rect.bottom())], Stroke::new(1.5_f32, ACCENT));
             let tri = vec![pos2(x - 5.0, rect.top()), pos2(x + 5.0, rect.top()), pos2(x, rect.top() + 7.0)];
             painter.add(egui::Shape::convex_polygon(tri, ACCENT, Stroke::NONE));
         }
@@ -1363,6 +1967,8 @@ impl StudioApp {
             ui.label("Beat Studio - a small pattern-based music maker.");
             ui.label(format!("{} ticks per beat, {STEPS_PER_BAR} steps per bar.", engine::PPQ));
             ui.label("Space: play / stop   L: pattern / song   F5-F9: windows");
+            ui.label("Ctrl+Z / Ctrl+Y: undo / redo   Ctrl+S: save   Ctrl+R: export");
+            ui.label("Drop sound, MIDI or project files on the window to open them.");
         });
         self.show_about = open;
     }
@@ -1376,20 +1982,28 @@ impl eframe::App for StudioApp {
             Err(poison) => poison.into_inner(),
         };
         let p: &mut Project = &mut guard;
+        self.undo_keys(ctx, p);
         self.shortcuts(ctx, p);
         self.midi_keys(p);
+        self.dropped_files(ctx, p);
         self.top_bar(ctx, p);
         self.browser(ctx, p);
         self.desktop(ctx, p);
         self.channel_rack(ctx, p);
         self.piano_roll(ctx, p);
         self.mixer(ctx, p);
+        self.plugin_params_window(ctx, p);
         self.about(ctx);
         self.file_window(ctx, p);
+        self.picker_window(ctx, p);
         self.info_window(ctx, p);
         self.audio_window(ctx, p);
         self.general_window(ctx, p);
         self.midi_window(ctx);
+        self.maintain_samples(p);
+        self.maintain_plugins(p);
+        self.maintain_recording(p);
+        self.track_undo(ctx, p);
         self.track_changes(ctx, p);
         self.settings.metronome = p.metronome;
         self.settings.typing_piano = self.typing_piano;

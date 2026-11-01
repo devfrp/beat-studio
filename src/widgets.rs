@@ -34,14 +34,14 @@ pub fn apply_style(ctx: &egui::Context) {
     v.override_text_color = Some(TEXT);
     v.panel_fill = PANEL_DARK;
     v.window_fill = PANEL;
-    v.window_stroke = Stroke::new(1.0, LINE);
+    v.window_stroke = Stroke::new(1.0_f32, LINE);
     v.window_rounding = Rounding::same(4.0);
     v.window_shadow = egui::epaint::Shadow { offset: vec2(0.0, 4.0), blur: 12.0, spread: 0.0, color: Color32::from_black_alpha(90) };
     v.extreme_bg_color = LCD;
     v.faint_bg_color = PANEL_DARK;
     v.selection.bg_fill = ACCENT.gamma_multiply(0.6);
     v.widgets.noninteractive.bg_fill = PANEL;
-    v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, LINE);
+    v.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, LINE);
     v.widgets.inactive.bg_fill = HEADER;
     v.widgets.inactive.weak_bg_fill = HEADER;
     v.widgets.hovered.bg_fill = HOVER;
@@ -88,12 +88,12 @@ pub fn knob(ui: &mut Ui, value: &mut f32, min: f32, max: f32, default: f32, size
     let c = rect.center();
     let rad = size * 0.5 - 1.0;
     painter.circle_filled(c, rad, PANEL_DEEP);
-    painter.circle_stroke(c, rad, Stroke::new(1.0, Color32::from_rgb(0x60, 0x6A, 0x72)));
+    painter.circle_stroke(c, rad, Stroke::new(1.0_f32, Color32::from_rgb(0x60, 0x6A, 0x72)));
     let frac = (*value - min) / (max - min);
     let ang = (-135.0f32 + 270.0 * frac).to_radians();
     let dir = vec2(ang.sin(), -ang.cos());
     let col = if resp.hovered() || resp.dragged() { ACCENT } else { Color32::from_rgb(0xC8, 0xD0, 0xD4) };
-    painter.line_segment([c + dir * rad * 0.25, c + dir * (rad - 1.5)], Stroke::new(2.0, col));
+    painter.line_segment([c + dir * rad * 0.25, c + dir * (rad - 1.5)], Stroke::new(2.0_f32, col));
     resp
 }
 

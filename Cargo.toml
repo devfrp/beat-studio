@@ -8,6 +8,7 @@ eframe = { version = "=0.29.1", default-features = false, features = ["default_f
 cpal = "=0.15.3"
 png = "=0.17.16"
 midir = "=0.11.1"
+symphonia = { version = "=0.5.5", default-features = false, features = ["wav", "pcm", "mp3", "flac", "ogg", "vorbis", "adpcm"] }
 
 [profile.dev]
 debug = false
