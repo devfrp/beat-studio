@@ -11,6 +11,7 @@ use crate::engine::{
     TEMPO_MAX, TEMPO_MIN, TICKS_PER_BAR, TICKS_PER_STEP,
 };
 use crate::file;
+use crate::midi::{self, MidiEvent, MidiIn};
 use crate::settings::{self, Settings};
 use crate::widgets::*;
 
@@ -156,7 +157,13 @@ pub struct StudioApp {
     restart_audio: bool,
     show_audio: bool,
     show_general: bool,
+    show_midi: bool,
     devices: Vec<String>,
+    midi: Option<MidiIn>,
+    midi_ports: Vec<String>,
+    midi_down: HashMap<u8, (usize, u8)>,
+    midi_last: Option<u8>,
+    next_midi_check: f64,
     last_autosave: f64,
     autosaved_text: String,
 }
@@ -233,7 +240,13 @@ impl StudioApp {
             restart_audio: false,
             show_audio: false,
             show_general: false,
+            show_midi: false,
             devices: Vec::new(),
+            midi: None,
+            midi_ports: Vec::new(),
+            midi_down: HashMap::new(),
+            midi_last: None,
+            next_midi_check: 0.0,
             last_autosave: 0.0,
             autosaved_text: String::new(),
         }
@@ -667,19 +680,129 @@ impl StudioApp {
                 if self.keys_down.contains_key(&key) {
                     continue;
                 }
-                let ch = self.selected_channel.min(p.channels.len() - 1);
-                let ahead = self.recording && p.record_note(ch, note);
-                if self.recording && p.mode == Mode::Song {
-                    self.hint = "Recording works in pattern mode (PAT)".into();
-                }
-                if !ahead {
-                    p.held.push((ch, note));
-                }
-                self.keys_down.insert(key, (ch, note));
+                let n = self.live_note_on(p, note, engine::NOTE_VELOCITY);
+                self.keys_down.insert(key, n);
             } else if let Some(n) = self.keys_down.remove(&key) {
                 p.releases.push(n);
             }
         }
+    }
+
+    /// Plays a note on the selected channel until it is released, and writes it
+    /// into the pattern while recording. Returns what to release later.
+    fn live_note_on(&mut self, p: &mut Project, key: u8, vel: u8) -> (usize, u8) {
+        let ch = self.selected_channel.min(p.channels.len() - 1);
+        let ahead = self.recording && p.record_note(ch, key, vel);
+        if self.recording && p.mode == Mode::Song {
+            self.hint = "Recording works in pattern mode (PAT)".into();
+        }
+        if !ahead {
+            p.held.push((ch, key, vel));
+        }
+        (ch, key)
+    }
+
+    /// Notes from the MIDI keyboard. Runs whatever has keyboard focus.
+    fn midi_keys(&mut self, p: &mut Project) {
+        let Some(m) = &self.midi else {
+            p.releases.extend(self.midi_down.drain().map(|(_, n)| n));
+            return;
+        };
+        for e in m.events() {
+            match e {
+                MidiEvent::On { key, vel } => {
+                    if let Some(n) = self.midi_down.remove(&key) {
+                        p.releases.push(n);
+                    }
+                    let n = self.live_note_on(p, key, vel);
+                    self.midi_down.insert(key, n);
+                    self.midi_last = Some(key);
+                }
+                MidiEvent::Off { key } => {
+                    if let Some(n) = self.midi_down.remove(&key) {
+                        p.releases.push(n);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Every 3 s: notices an unplugged keyboard and connects to the chosen one.
+    /// Runs with the project unlocked, as opening a port can take a moment.
+    fn midi_connect(&mut self, now: f64) {
+        if self.screenshot.is_some() || now < self.next_midi_check {
+            return;
+        }
+        self.next_midi_check = now + 3.0;
+        self.midi_ports = midi::input_ports();
+        let want = self.settings.midi_input.clone();
+        if let Some(m) = &self.midi {
+            let unplugged = !self.midi_ports.contains(&m.name);
+            if unplugged || (want != midi::AUTO && want != m.name) {
+                if unplugged {
+                    self.hint = format!("MIDI keyboard disconnected: {}", m.name);
+                }
+                self.midi = None;
+            }
+        }
+        if self.midi.is_none() && want != midi::OFF && !self.midi_ports.is_empty() {
+            self.midi = MidiIn::open(&want);
+            if let Some(m) = &self.midi {
+                self.hint = format!("MIDI keyboard: {}", m.name);
+            }
+        }
+    }
+
+    fn midi_window(&mut self, ctx: &egui::Context) {
+        if !self.show_midi {
+            return;
+        }
+        let mut open = true;
+        egui::Window::new("MIDI settings").open(&mut open).collapsible(false).resizable(false).show(ctx, |ui| {
+            egui::Grid::new("midi").num_columns(2).spacing(vec2(10.0, 6.0)).show(ui, |ui| {
+                ui.label("Input");
+                ui.horizontal(|ui| {
+                    let label = |v: &str| match v {
+                        midi::AUTO => "Automatic (first keyboard found)".to_string(),
+                        midi::OFF => "Off".to_string(),
+                        v => v.to_string(),
+                    };
+                    let before = self.settings.midi_input.clone();
+                    egui::ComboBox::from_id_salt("midi_in").selected_text(label(&before)).width(260.0).show_ui(ui, |ui| {
+                        let choices = [midi::AUTO.to_string(), midi::OFF.to_string()].into_iter().chain(self.midi_ports.iter().cloned());
+                        for c in choices {
+                            let text = label(&c);
+                            ui.selectable_value(&mut self.settings.midi_input, c, text);
+                        }
+                    });
+                    if ui.small_button("Refresh").clicked() || self.settings.midi_input != before {
+                        if self.settings.midi_input == midi::OFF {
+                            self.midi = None;
+                        }
+                        self.next_midi_check = 0.0;
+                    }
+                });
+                ui.end_row();
+
+                ui.label("Status");
+                match &self.midi {
+                    Some(m) => ui.label(format!("connected to {}", m.name)),
+                    None if self.settings.midi_input == midi::OFF => ui.label("off"),
+                    None => ui.colored_label(RED, "no MIDI keyboard found"),
+                };
+                ui.end_row();
+
+                ui.label("Last note");
+                ui.label(self.midi_last.map(key_name).unwrap_or_else(|| "-".into()));
+                ui.end_row();
+            });
+            ui.label(
+                egui::RichText::new("Notes play on the selected channel. Turn on recording to write them into the pattern.")
+                    .color(TEXT_DIM)
+                    .size(11.0),
+            );
+        });
+        self.show_midi = open;
     }
 
     fn release_all_keys(&mut self, p: &mut Project) {
@@ -818,6 +941,11 @@ impl StudioApp {
             if ui.button("Audio settings...").clicked() {
                 self.show_audio = true;
                 self.devices = engine::output_devices();
+                ui.close_menu();
+            }
+            if ui.button("MIDI settings...").clicked() {
+                self.show_midi = true;
+                self.next_midi_check = 0.0;
                 ui.close_menu();
             }
             if ui.button("General settings...").clicked() {
@@ -1249,6 +1377,7 @@ impl eframe::App for StudioApp {
         };
         let p: &mut Project = &mut guard;
         self.shortcuts(ctx, p);
+        self.midi_keys(p);
         self.top_bar(ctx, p);
         self.browser(ctx, p);
         self.desktop(ctx, p);
@@ -1260,11 +1389,13 @@ impl eframe::App for StudioApp {
         self.info_window(ctx, p);
         self.audio_window(ctx, p);
         self.general_window(ctx, p);
+        self.midi_window(ctx);
         self.track_changes(ctx, p);
         self.settings.metronome = p.metronome;
         self.settings.typing_piano = self.typing_piano;
         drop(guard);
         self.apply_settings();
+        self.midi_connect(ctx.input(|i| i.time));
         self.handle_screenshot(ctx);
         ctx.request_repaint_after(std::time::Duration::from_millis(16));
     }

@@ -184,8 +184,8 @@ pub struct Project {
     pub sample_rate: f32,
     pub audio_ok: bool,
     pub previews: Vec<(usize, u8)>,
-    /// Notes played live (typing keyboard): they sound until listed in `releases`.
-    pub held: Vec<(usize, u8)>,
+    /// Notes played live (channel, key, velocity): they sound until listed in `releases`.
+    pub held: Vec<(usize, u8, u8)>,
     pub releases: Vec<(usize, u8)>,
     pub metronome: bool,
     voices: Vec<Voice>,
@@ -392,7 +392,7 @@ impl Project {
 
     /// Adds a live-played note to the current pattern at the nearest step.
     /// Returns true when that step is still ahead, so the sequencer will play it.
-    pub fn record_note(&mut self, ch: usize, key: u8) -> bool {
+    pub fn record_note(&mut self, ch: usize, key: u8, vel: u8) -> bool {
         if !self.playing || self.mode != Mode::Pattern || ch >= self.channels.len() {
             return false;
         }
@@ -403,7 +403,7 @@ impl Project {
         let start = step * TICKS_PER_STEP;
         let list = &mut pat.notes[ch];
         if !list.iter().any(|n| n.start == start && n.key == key) {
-            list.push(Note { key, start, len: TICKS_PER_STEP, vel: NOTE_VELOCITY });
+            list.push(Note { key, start, len: TICKS_PER_STEP, vel });
         }
         (start as f64) > self.position || (step == 0 && self.position > (len - TICKS_PER_STEP) as f64)
     }
@@ -421,8 +421,8 @@ impl Project {
         for (ch, key) in previews {
             self.start_voice(ch, key, NOTE_VELOCITY, TICKS_PER_STEP * 2);
         }
-        for (ch, key) in std::mem::take(&mut self.held) {
-            self.start_voice_secs(ch, key, NOTE_VELOCITY, HELD_GATE_SECS);
+        for (ch, key, vel) in std::mem::take(&mut self.held) {
+            self.start_voice_secs(ch, key, vel, HELD_GATE_SECS);
         }
         for (ch, key) in std::mem::take(&mut self.releases) {
             for v in self.voices.iter_mut().filter(|v| v.channel == ch && v.key == key && v.gate > v.t) {
@@ -718,13 +718,13 @@ mod tests {
         let mut p = Project::new();
         p.playing = true;
         p.position = 25.0;
-        assert!(!p.record_note(0, 60)); // step 2 starts at 24, already passed
+        assert!(!p.record_note(0, 60, NOTE_VELOCITY)); // step 2 starts at 24, already passed
         p.position = 40.0;
-        assert!(p.record_note(0, 60)); // step 3 at 48 is still ahead
+        assert!(p.record_note(0, 60, NOTE_VELOCITY)); // step 3 at 48 is still ahead
         assert!(p.patterns[0].has_step(0, 1));
         assert!(p.patterns[0].has_step(0, 2));
         p.position = (TICKS_PER_BAR - 5) as f64;
-        assert!(p.record_note(1, 60)); // wraps to the first step
+        assert!(p.record_note(1, 60, NOTE_VELOCITY)); // wraps to the first step
         assert!(p.patterns[0].has_step(1, 0));
     }
 }

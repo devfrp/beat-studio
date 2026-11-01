@@ -3,6 +3,8 @@
 use std::fs;
 use std::path::PathBuf;
 
+use crate::midi;
+
 pub const UI_SCALES: [f32; 6] = [0.8, 0.9, 1.0, 1.1, 1.25, 1.5];
 pub const BUFFER_SIZES: [u32; 6] = [128, 256, 512, 1024, 2048, 4096];
 pub const AUTOSAVE_CHOICES: [u32; 5] = [0, 1, 5, 10, 30];
@@ -18,11 +20,13 @@ pub struct Settings {
     pub autosave_minutes: u32,
     pub metronome: bool,
     pub typing_piano: bool,
+    /// MIDI input name, or midi::AUTO / midi::OFF.
+    pub midi_input: String,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { device: None, buffer: None, ui_scale: 1.0, autosave_minutes: 5, metronome: false, typing_piano: true }
+        Settings { device: None, buffer: None, ui_scale: 1.0, autosave_minutes: 5, metronome: false, typing_piano: true, midi_input: midi::AUTO.into() }
     }
 }
 
@@ -49,13 +53,14 @@ impl Settings {
 
     fn to_text(&self) -> String {
         format!(
-            "device = {}\nbuffer = {}\nui_scale = {}\nautosave_minutes = {}\nmetronome = {}\ntyping_piano = {}\n",
+            "device = {}\nbuffer = {}\nui_scale = {}\nautosave_minutes = {}\nmetronome = {}\ntyping_piano = {}\nmidi_input = {}\n",
             self.device.as_deref().unwrap_or(""),
             self.buffer.map(|b| b.to_string()).unwrap_or_default(),
             self.ui_scale,
             self.autosave_minutes,
             self.metronome,
             self.typing_piano,
+            self.midi_input,
         )
     }
 
@@ -71,6 +76,7 @@ impl Settings {
                 "autosave_minutes" => s.autosave_minutes = v.parse().unwrap_or(5),
                 "metronome" => s.metronome = v == "true",
                 "typing_piano" => s.typing_piano = v != "false",
+                "midi_input" if !v.is_empty() => s.midi_input = v.to_string(),
                 _ => {}
             }
         }
@@ -91,6 +97,7 @@ mod tests {
             autosave_minutes: 10,
             metronome: true,
             typing_piano: false,
+            midi_input: "USB Keys:USB Keys MIDI 1 20:0".into(),
         };
         assert_eq!(Settings::from_text(&s.to_text()), s);
         assert_eq!(Settings::from_text(&Settings::default().to_text()), Settings::default());
