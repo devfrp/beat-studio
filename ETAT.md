@@ -45,6 +45,7 @@ Ces fonctions compilent et leur logique est testée, mais personne ne les a essa
 
 ## Pour reprendre
 
-- Dépôt GitHub privé : `devfrp/beat-studio`, à jour au 1er novembre 2026.
+- Dépôt GitHub public : `devfrp/beat-studio`, licence MIT. Version 0.1.0 publiée le 5 novembre 2026 (AppImage, .exe Windows, application macOS universelle), construite par GitHub Actions à chaque tag `v*` (`.github/workflows/release.yml`). Installation Linux : `curl -fsSL https://raw.githubusercontent.com/devfrp/beat-studio/main/install.sh | sh`.
+- Les versions Windows et macOS n'ont pas encore été essayées sur une vraie machine.
 - Le dossier `target` est un lien vers `/tmp/ca_target`, vidé au redémarrage : refaire `mkdir -p /tmp/ca_target` avant de compiler, et la première compilation est plus longue.
 - Prochaine étape conseillée : essayer l'application (`cargo run`) et noter ce qui ne marche pas.
