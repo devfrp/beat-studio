@@ -371,52 +371,51 @@ impl StudioApp {
             let what = if self.note_sel.is_empty() { "all notes" } else { "the selected notes" };
             ui.menu_button("Tools", |ui| {
                 ui.label(egui::RichText::new(format!("On {what}")).color(TEXT_DIM).size(10.0));
-                for (tool, label, tip) in [
-                    (NoteTool::Quantize, "Quantize", "Snap starts and lengths to the step grid"),
-                    (NoteTool::Legato, "Legato", "Each note lasts until the next one starts"),
-                    (NoteTool::Chop, "Chop", "Cut notes into one-step pieces"),
-                    (NoteTool::Reverse, "Reverse", "Play the notes backwards in time"),
-                    (NoteTool::OctaveUp, "Octave up", "Move the notes up 12 semitones"),
-                    (NoteTool::OctaveDown, "Octave down", "Move the notes down 12 semitones"),
-                    (NoteTool::FlipKeys, "Flip keys", "Mirror the melody upside down"),
-                    (NoteTool::Arpeggiate, "Arpeggiate", "Spread each chord one step per note"),
-                    (NoteTool::Humanize, "Humanize velocity", "Vary the velocities a little"),
-                    (NoteTool::Stretch(2, 1), "Stretch x2", "Twice as slow: starts and lengths doubled"),
-                    (NoteTool::Stretch(1, 2), "Stretch /2", "Twice as fast: starts and lengths halved"),
-                    (NoteTool::RemoveDuplicates, "Remove duplicates", "Delete notes on the same key and start as another"),
-                    (NoteTool::TrimOverlaps, "Trim overlaps", "Shorten notes that run into the next one on their key"),
-                ] {
+                let mut picked = None;
+                let mut item = |ui: &mut Ui, tool: NoteTool, label: &str, tip: &str| {
                     if ui.button(label).on_hover_text(tip).clicked() {
-                        self.note_tool(p, pat, ch, tool);
+                        picked = Some(tool);
                         ui.close_menu();
                     }
-                }
-                ui.separator();
-                ui.menu_button("Snap to scale", |ui| {
-                    for (root, name) in KEY_NAMES.iter().enumerate() {
-                        ui.menu_button(*name, |ui| {
-                            for (si, (scale, _)) in SCALES.iter().enumerate() {
-                                if ui.button(format!("{name} {scale}")).clicked() {
-                                    self.note_tool(p, pat, ch, NoteTool::Scale(root as u8, si));
-                                    ui.close_menu();
+                };
+                ui.menu_button("Time", |ui| {
+                    item(ui, NoteTool::Quantize, "Quantize", "Snap starts and lengths to the step grid");
+                    item(ui, NoteTool::Legato, "Legato", "Each note lasts until the next one starts");
+                    item(ui, NoteTool::Chop, "Chop", "Cut notes into one-step pieces");
+                    item(ui, NoteTool::Reverse, "Reverse", "Play the notes backwards in time");
+                    item(ui, NoteTool::Stretch(2, 1), "Stretch x2", "Twice as slow: starts and lengths doubled");
+                    item(ui, NoteTool::Stretch(1, 2), "Stretch /2", "Twice as fast: starts and lengths halved");
+                    item(ui, NoteTool::Arpeggiate, "Arpeggiate", "Spread each chord one step per note");
+                    ui.separator();
+                    item(ui, NoteTool::TrimOverlaps, "Trim overlaps", "Shorten notes that run into the next one on their key");
+                    item(ui, NoteTool::RemoveDuplicates, "Remove duplicates", "Delete notes on the same key and start as another");
+                });
+                ui.menu_button("Pitch", |ui| {
+                    item(ui, NoteTool::OctaveUp, "Octave up", "Move the notes up 12 semitones");
+                    item(ui, NoteTool::OctaveDown, "Octave down", "Move the notes down 12 semitones");
+                    item(ui, NoteTool::FlipKeys, "Flip keys", "Mirror the melody upside down");
+                    ui.menu_button("Snap to scale", |ui| {
+                        for (root, name) in KEY_NAMES.iter().enumerate() {
+                            ui.menu_button(*name, |ui| {
+                                for (si, (scale, _)) in SCALES.iter().enumerate() {
+                                    item(ui, NoteTool::Scale(root as u8, si), &format!("{name} {scale}"), "Move each note to the nearest note of the scale");
                                 }
-                            }
-                        });
-                    }
-                });
-                ui.menu_button("Chords", |ui| {
-                    for (ci, (chord, _)) in CHORDS.iter().enumerate() {
-                        if ui.button(*chord).clicked() {
-                            self.note_tool(p, pat, ch, NoteTool::Chord(ci));
-                            ui.close_menu();
+                            });
                         }
-                    }
+                    });
+                    ui.menu_button("Chords", |ui| {
+                        for (ci, (chord, _)) in CHORDS.iter().enumerate() {
+                            item(ui, NoteTool::Chord(ci), chord, "Add the chord's notes above each note");
+                        }
+                    });
                 });
-                for (tool, label) in [(NoteTool::Crescendo, "Crescendo"), (NoteTool::Decrescendo, "Decrescendo")] {
-                    if ui.button(label).on_hover_text("Velocities rise or fall from the first note to the last").clicked() {
-                        self.note_tool(p, pat, ch, tool);
-                        ui.close_menu();
-                    }
+                ui.menu_button("Velocity", |ui| {
+                    item(ui, NoteTool::Humanize, "Humanize", "Vary the velocities a little");
+                    item(ui, NoteTool::Crescendo, "Crescendo", "Velocities rise from the first note to the last");
+                    item(ui, NoteTool::Decrescendo, "Decrescendo", "Velocities fall from the first note to the last");
+                });
+                if let Some(tool) = picked {
+                    self.note_tool(p, pat, ch, tool);
                 }
             });
             ui.label(
