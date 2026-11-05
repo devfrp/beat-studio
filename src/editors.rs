@@ -297,10 +297,10 @@ impl StudioApp {
     /// is selected). Length markers (velocity 0) are left alone.
     fn note_tool(&mut self, p: &mut Project, pat: usize, ch: usize, tool: NoteTool) {
         if let NoteTool::Riff(root, si) = tool {
-            // A whole new melody over the pattern, between C4 (60) and C6 (84).
+            // A whole new melody over the pattern, keys 48 to 72 (C4 to C6 as the piano roll names them).
             let steps = p.patterns[pat].length_ticks() / TICKS_PER_STEP;
             let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.subsec_nanos());
-            let notes = notetools::riff(root, SCALES[si].1, 60, 84, steps, TICKS_PER_STEP, 60, seed);
+            let notes = notetools::riff(root, SCALES[si].1, 48, 72, steps, TICKS_PER_STEP, 60, seed);
             let list = &mut p.patterns[pat].notes[ch];
             list.retain(|n| n.vel == 0);
             list.extend(notes);

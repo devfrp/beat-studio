@@ -214,6 +214,9 @@ pub struct StudioApp {
     _stream: Option<cpal::Stream>,
     pub screenshot: Option<PathBuf>,
     frames: u32,
+    /// Developer check: pointer events replayed before the screenshot
+    /// (frame, event in screenshot pixels), from BEATSTUDIO_INPUT.
+    script: Vec<(u32, ScriptEvent)>,
     shot_requested: bool,
     pub show_browser: bool,
     pub show_playlist: bool,
@@ -331,6 +334,7 @@ impl StudioApp {
         let mut app = StudioApp {
             shared,
             _stream: stream,
+            script: Vec::new(),
             screenshot,
             frames: 0,
             shot_requested: false,
@@ -409,6 +413,11 @@ impl StudioApp {
             ghost_notes: true,
             mp3_ok: audiofile::mp3_available(),
         };
+        if app.screenshot.is_some() {
+            if let Ok(text) = std::env::var("BEATSTUDIO_INPUT") {
+                app.script = parse_script(&text);
+            }
+        }
         // Developer check: only these windows, e.g. BEATSTUDIO_SHOW=piano,playlist.
         if let Ok(list) = std::env::var("BEATSTUDIO_SHOW") {
             let on = |w: &str| list.split(',').any(|x| x.trim() == w);
@@ -814,7 +823,8 @@ impl StudioApp {
         let Some(path) = self.screenshot.clone() else { return };
         self.frames += 1;
         ctx.request_repaint();
-        if self.frames >= 120 && !self.shot_requested {
+        let script_end = self.script.last().map_or(0, |e| e.0 + 30);
+        if self.frames >= 120.max(script_end) && !self.shot_requested {
             self.shot_requested = true;
             ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot);
         }
@@ -1102,11 +1112,12 @@ impl StudioApp {
         egui::TopBottomPanel::top("top")
             .frame(egui::Frame::none().fill(HEADER).inner_margin(egui::Margin::symmetric(6.0, 4.0)))
             .show(ctx, |ui| {
-                ui.horizontal_wrapped(|ui| {
+                ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 2.0;
                     self.menus(ui, p);
                     ui.add_space(12.0);
-                    ui.label(egui::RichText::new(&self.hint).color(TEXT_DIM).size(11.0));
+                    // One line: a long hint is cut rather than pushing the bars down.
+                    ui.add(egui::Label::new(egui::RichText::new(&self.hint).color(TEXT_DIM).size(11.0)).truncate());
                 });
                 ui.add_space(2.0);
                 ui.horizontal_wrapped(|ui| {
@@ -2063,6 +2074,23 @@ impl StudioApp {
 }
 
 impl eframe::App for StudioApp {
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
+        if self.script.is_empty() {
+            return;
+        }
+        let ppp = ctx.pixels_per_point();
+        for (_, e) in self.script.iter().filter(|e| e.0 == self.frames) {
+            let at = |x: f32, y: f32| pos2(x / ppp, y / ppp);
+            raw.events.push(match *e {
+                ScriptEvent::Move(x, y) => egui::Event::PointerMoved(at(x, y)),
+                ScriptEvent::Button(x, y, button, pressed, modifiers) => {
+                    raw.modifiers = modifiers;
+                    egui::Event::PointerButton { pos: at(x, y), button, pressed, modifiers }
+                }
+            });
+        }
+    }
+
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let shared = self.shared.clone();
         let mut guard = match shared.lock() {
@@ -2101,4 +2129,56 @@ impl eframe::App for StudioApp {
         self.handle_screenshot(ctx);
         ctx.request_repaint_after(std::time::Duration::from_millis(16));
     }
+}
+
+#[derive(Clone, Copy)]
+enum ScriptEvent {
+    Move(f32, f32),
+    Button(f32, f32, egui::PointerButton, bool, egui::Modifiers),
+}
+
+/// Reads BEATSTUDIO_INPUT: actions separated by ";", in screenshot pixels:
+/// `click x y [ctrl|shift]`, `rclick x y`, `move x y`, `drag x1 y1 x2 y2 [ctrl|shift]`,
+/// `wait frames`. Each action starts a few frames after the previous one.
+fn parse_script(text: &str) -> Vec<(u32, ScriptEvent)> {
+    let mut out = Vec::new();
+    let mut f = 20u32;
+    for step in text.split(';') {
+        let w: Vec<&str> = step.split_whitespace().collect();
+        let num = |i: usize| w.get(i).and_then(|v| v.parse::<f32>().ok()).unwrap_or(0.0);
+        let mods = match w.last().copied() {
+            Some("ctrl") => egui::Modifiers::COMMAND,
+            Some("shift") => egui::Modifiers::SHIFT,
+            _ => egui::Modifiers::NONE,
+        };
+        let press = |x, y, b, down, m| ScriptEvent::Button(x, y, b, down, m);
+        match w.first().copied() {
+            Some("click") | Some("rclick") => {
+                let b = if w[0] == "rclick" { egui::PointerButton::Secondary } else { egui::PointerButton::Primary };
+                let (x, y) = (num(1), num(2));
+                out.push((f, ScriptEvent::Move(x, y)));
+                out.push((f + 2, press(x, y, b, true, mods)));
+                out.push((f + 4, press(x, y, b, false, mods)));
+                f += 12;
+            }
+            Some("drag") => {
+                let (x1, y1, x2, y2) = (num(1), num(2), num(3), num(4));
+                out.push((f, ScriptEvent::Move(x1, y1)));
+                out.push((f + 2, press(x1, y1, egui::PointerButton::Primary, true, mods)));
+                for k in 1..=8 {
+                    let t = k as f32 / 8.0;
+                    out.push((f + 2 + k * 2, ScriptEvent::Move(x1 + (x2 - x1) * t, y1 + (y2 - y1) * t)));
+                }
+                out.push((f + 22, press(x2, y2, egui::PointerButton::Primary, false, mods)));
+                f += 32;
+            }
+            Some("move") => {
+                out.push((f, ScriptEvent::Move(num(1), num(2))));
+                f += 10;
+            }
+            Some("wait") => f += num(1) as u32,
+            _ => {}
+        }
+    }
+    out
 }
