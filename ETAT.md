@@ -7,7 +7,8 @@
 - Exports : WAV, MP3 (bibliothèque LAME du système), MIDI. Import MIDI.
 - Jeu en direct : métronome, tempo au tap, clavier d'ordinateur en piano, clavier MIDI, enregistrement des notes.
 - Annuler / rétablir (Ctrl+Z / Ctrl+Y).
-- Piano roll : sélection, copier / couper / coller / dupliquer, flèches, couloir de vélocité, menu Tools (Quantize, Legato, Chop, Reverse).
+- Piano roll : sélection, copier / couper / coller / dupliquer, flèches, couloir de vélocité, menu Tools (Quantize, Legato, Chop, Reverse, octave, Flip keys, Arpeggiate, Humanize).
+- Channel rack : sous-menu Steps (remplir un pas sur 1, 2, 4 ou 8, décaler, pas au hasard).
 - Mixer : solo, envois entre pistes, 10 emplacements d'effets, 6 effets intégrés (Reverb, Delay, EQ, Compressor, Filter, Distortion).
 - Plugins CLAP (instruments et effets) : 239 trouvés sur cette machine, réglages en curseurs, fenêtre propre du plugin (X11), état gardé dans le projet.
 - Sons du disque (WAV, MP3, FLAC, OGG), fichiers déposés sur la fenêtre.

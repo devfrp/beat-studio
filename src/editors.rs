@@ -156,6 +156,31 @@ impl StudioApp {
                         }
                     });
                     ui.separator();
+                    ui.menu_button("Steps", |ui| {
+                        let total = p.patterns[pat].length_ticks();
+                        let list = &mut p.patterns[pat].notes[ch];
+                        let (key, len, vel) = (engine::STEP_KEY, TICKS_PER_STEP, NOTE_VELOCITY);
+                        for every in [1, 2, 4, 8] {
+                            let label = if every == 1 { "Fill every step".to_string() } else { format!("Fill each {every} steps") };
+                            if ui.button(label).clicked() {
+                                notetools::fill_every(list, key, len, every, vel, total);
+                                ui.close_menu();
+                            }
+                        }
+                        if ui.button("Shift left").on_hover_text("Every note one step earlier (the first goes to the end)").clicked() {
+                            notetools::rotate(list, -(TICKS_PER_STEP as i64), total);
+                            ui.close_menu();
+                        }
+                        if ui.button("Shift right").on_hover_text("Every note one step later (the last goes to the start)").clicked() {
+                            notetools::rotate(list, TICKS_PER_STEP as i64, total);
+                            ui.close_menu();
+                        }
+                        if ui.button("Random steps").on_hover_text("About one step in three, different each time").clicked() {
+                            let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.subsec_nanos());
+                            notetools::random_steps(list, key, len, vel, total, 33, seed);
+                            ui.close_menu();
+                        }
+                    });
                     if ui.button("Clear notes").clicked() {
                         p.patterns[pat].notes[ch].clear();
                         ui.close_menu();

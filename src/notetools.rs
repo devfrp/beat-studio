@@ -307,3 +307,128 @@ mod tests2 {
         humanize(&mut notes, 10, 7);
     }
 }
+
+// ---------------------------------------------------------------- channel rack steps
+
+/// Replaces the step notes with one every `every` steps (other notes and markers stay).
+pub fn fill_every(notes: &mut Vec<Note>, key: u8, step_len: u32, every: u32, vel: u8, total_ticks: u32) {
+    let step_size = every * step_len;
+    let mut filtered: Vec<Note> = notes.iter()
+        .filter(|note| !(note.key == key && note.len == step_len && note.vel > 0))
+        .copied()
+        .collect();
+    let mut i: u32 = 0;
+    while i * step_size < total_ticks {
+        filtered.push(Note {
+            key,
+            start: i * step_size,
+            len: step_len,
+            vel,
+        });
+        i += 1;
+    }
+    *notes = filtered;
+}
+
+/// Moves the notes by `by` ticks, wrapping around the pattern; markers stay.
+pub fn rotate(notes: &mut [Note], by: i64, total_ticks: u32) {
+    let total = total_ticks as i64;
+    for note in notes.iter_mut() {
+        if note.vel > 0 {
+            let new_start = ((note.start as i64 + by).rem_euclid(total)) as u32;
+            note.start = new_start;
+        }
+    }
+}
+
+/// Replaces the step notes with random ones, about `percent` in 100 (xorshift32).
+pub fn random_steps(notes: &mut Vec<Note>, key: u8, step_len: u32, vel: u8, total_ticks: u32, percent: u32, seed: u32) {
+    let step_size = step_len;
+    let mut filtered: Vec<Note> = notes.iter()
+        .filter(|note| !(note.key == key && note.len == step_len && note.vel > 0))
+        .copied()
+        .collect();
+    let mut state: u32 = seed | 1;
+    let mut i: u32 = 0;
+    while i * step_size < total_ticks {
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        if state % 100 < percent {
+            filtered.push(Note {
+                key,
+                start: i * step_size,
+                len: step_len,
+                vel,
+            });
+        }
+        i += 1;
+    }
+    *notes = filtered;
+}
+
+#[cfg(test)]
+mod tests3 {
+    use super::*;
+
+    fn s(start: u32) -> Note {
+        Note { key: 60, start, len: 24, vel: 100 }
+    }
+
+    #[test]
+    fn test_fill_every() {
+        let mut notes = vec![
+            s(24),
+            Note { key: 60, start: 0, len: 384, vel: 0 },
+            Note { key: 64, start: 0, len: 48, vel: 90 },
+        ];
+        fill_every(&mut notes, 60, 24, 4, 100, 384);
+        let expected = vec![
+            Note { key: 60, start: 0, len: 384, vel: 0 },
+            Note { key: 64, start: 0, len: 48, vel: 90 },
+            s(0),
+            s(96),
+            s(192),
+            s(288),
+        ];
+        assert_eq!(notes, expected);
+    }
+
+    #[test]
+    fn test_rotate() {
+        let mut notes = vec![s(0), s(360)];
+        rotate(&mut notes, 24, 384);
+        assert_eq!(notes, vec![s(24), s(0)]);
+        let marker = Note { key: 60, start: 0, len: 384, vel: 0 };
+        let mut notes3 = vec![marker];
+        rotate(&mut notes3, 24, 384);
+        assert_eq!(notes3, vec![marker]);
+
+        let mut notes2 = vec![s(0)];
+        rotate(&mut notes2, -24, 384);
+        assert_eq!(notes2, vec![s(360)]);
+    }
+
+    #[test]
+    fn test_random_steps() {
+        let mut notes = vec![s(0)];
+        random_steps(&mut notes, 60, 24, 100, 384, 0, 3);
+        assert!(notes.is_empty());
+
+        let mut notes2 = vec![s(0)];
+        random_steps(&mut notes2, 60, 24, 100, 384, 100, 3);
+        for note in &notes2 {
+            assert_eq!(note.len, 24);
+            assert!(note.start.is_multiple_of(24));
+        }
+        assert_eq!(notes2.len(), 16);
+
+        let mut notes3 = vec![s(0)];
+        random_steps(&mut notes3, 60, 24, 100, 384, 50, 3);
+        assert!((1..=15).contains(&notes3.len()));
+        for note in &notes3 {
+            assert_eq!(note.len, 24);
+            assert!(note.start.is_multiple_of(24));
+        }
+    }
+}

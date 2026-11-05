@@ -1939,6 +1939,15 @@ impl StudioApp {
         if gr.drag_started_by(egui::PointerButton::Primary) {
             if let (Some(ci), Some(pp)) = (hit, gr.interact_pointer_pos()) {
                 let (bar, _) = cell(pp);
+                // Ctrl or Shift: drag a copy, the original stays.
+                let copy = ui.input(|i| i.modifiers.ctrl || i.modifiers.shift);
+                let ci = if copy {
+                    let c = &p.clips[ci];
+                    p.clips.push(Clip { track: c.track, start_bar: c.start_bar, pattern: c.pattern });
+                    p.clips.len() - 1
+                } else {
+                    ci
+                };
                 self.clip_drag = Some(ClipDrag { index: ci, grab_bars: bar - p.clips[ci].start_bar as i64 });
                 p.current_pattern = p.clips[ci].pattern;
             }
@@ -1966,7 +1975,7 @@ impl StudioApp {
             }
         }
         if gr.hovered() {
-            self.hint = "Playlist: click to place the selected pattern, right-click to delete".into();
+            self.hint = "Playlist: click to place the selected pattern, drag to move (Ctrl+drag: copy), right-click to delete".into();
         }
 
         // In pattern mode the play head shows where the pattern sits in the song.
