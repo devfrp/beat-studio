@@ -368,6 +368,8 @@ impl StudioApp {
                 p.patterns[pat].notes[ch].clear();
                 self.note_sel.clear();
             }
+            ui.checkbox(&mut self.ghost_notes, egui::RichText::new("Ghosts").size(11.0))
+                .on_hover_text("Show the other instruments' notes faintly");
             let what = if self.note_sel.is_empty() { "all notes" } else { "the selected notes" };
             ui.menu_button("Tools", |ui| {
                 ui.label(egui::RichText::new(format!("On {what}")).color(TEXT_DIM).size(10.0));
@@ -471,6 +473,22 @@ impl StudioApp {
         }
         let end_x = tick_x(p.patterns[pat].length_ticks());
         painter.rect_filled(Rect::from_min_max(pos2(end_x, grid.top()), grid.max), 0.0, Color32::from_black_alpha(50));
+
+        // Ghost notes: the other instruments' melodies in this pattern, faint.
+        // Instruments that only play steps (drums) are left out.
+        if self.ghost_notes {
+            for (oc, list) in p.patterns[pat].notes.iter().enumerate() {
+                let melodic = list.iter().any(|n| n.vel > 0 && (n.key != engine::STEP_KEY || n.len != TICKS_PER_STEP));
+                if oc == ch || !melodic {
+                    continue;
+                }
+                for n in list.iter().filter(|n| n.vel > 0) {
+                    let r = Rect::from_min_max(pos2(tick_x(n.start), key_y(n.key)), pos2(tick_x(n.start + n.len), key_y(n.key) + key_h)).shrink(1.0);
+                    painter.rect_filled(r, 2.0, Color32::from_white_alpha(18));
+                    painter.rect_stroke(r, 2.0, Stroke::new(1.0_f32, Color32::from_white_alpha(40)));
+                }
+            }
+        }
 
         let hover = ui.input(|i| i.pointer.hover_pos()).filter(|hp| !lane.contains(*hp));
         let mut hit: Option<(usize, DragKind)> = None;

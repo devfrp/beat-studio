@@ -297,6 +297,8 @@ pub struct StudioApp {
     pub auto_draw: Option<(usize, u32, f32)>,
     /// Bar the playlist ruler was right-clicked on.
     pub ruler_bar: u32,
+    /// Piano roll shows the other instruments' notes faintly.
+    pub ghost_notes: bool,
     mp3_ok: bool,
 }
 
@@ -404,8 +406,18 @@ impl StudioApp {
             auto_drag: None,
             auto_draw: None,
             ruler_bar: 0,
+            ghost_notes: true,
             mp3_ok: audiofile::mp3_available(),
         };
+        // Developer check: only these windows, e.g. BEATSTUDIO_SHOW=piano,playlist.
+        if let Ok(list) = std::env::var("BEATSTUDIO_SHOW") {
+            let on = |w: &str| list.split(',').any(|x| x.trim() == w);
+            app.show_browser = on("browser");
+            app.show_playlist = on("playlist");
+            app.show_rack = on("rack");
+            app.show_piano = on("piano");
+            app.show_mixer = on("mixer");
+        }
         if app.screenshot.is_none() {
             app.load_plugin_list();
         }
