@@ -217,6 +217,8 @@ pub struct StudioApp {
     /// Developer check: pointer events replayed before the screenshot
     /// (frame, event in screenshot pixels), from BEATSTUDIO_INPUT.
     script: Vec<(u32, ScriptEvent)>,
+    /// Keys held by the script between a press and its release.
+    script_mods: egui::Modifiers,
     shot_requested: bool,
     pub show_browser: bool,
     pub show_playlist: bool,
@@ -335,6 +337,7 @@ impl StudioApp {
             shared,
             _stream: stream,
             script: Vec::new(),
+            script_mods: egui::Modifiers::NONE,
             screenshot,
             frames: 0,
             shot_requested: false,
@@ -1897,9 +1900,14 @@ impl StudioApp {
             let lane_hit = Rect::from_min_max(pos2(vis.left() + head_w, lane.top()), lane.max);
             let lr = ui.interact(lane_hit, ui.id().with(("auto", ai)), Sense::click_and_drag());
             let near = lr.hover_pos().or(lr.interact_pointer_pos()).and_then(|hp| pts.iter().position(|q| q.distance(hp) < 7.0));
+            // Handles only where they have room: a drawn curve has a point per step.
+            let mut last_dot: Option<Pos2> = None;
             for (k, q) in pts.iter().enumerate() {
                 let lit = near == Some(k) || self.auto_drag == Some((ai, k));
-                painter.circle_filled(*q, if lit { 5.0 } else { 3.5 }, if lit { ACCENT } else { col });
+                if lit || last_dot.is_none_or(|d| d.distance(*q) >= 8.0) {
+                    painter.circle_filled(*q, if lit { 5.0 } else { 3.5 }, if lit { ACCENT } else { col });
+                    last_dot = Some(*q);
+                }
             }
             let snap = |x: f32| {
                 let t = ((x - grid.left()) / bar_w * TICKS_PER_BAR as f32).max(0.0);
@@ -2084,10 +2092,15 @@ impl eframe::App for StudioApp {
             raw.events.push(match *e {
                 ScriptEvent::Move(x, y) => egui::Event::PointerMoved(at(x, y)),
                 ScriptEvent::Button(x, y, button, pressed, modifiers) => {
+                    // Held from the press to the release, like a real key.
+                    self.script_mods = if pressed { modifiers } else { egui::Modifiers::NONE };
                     raw.modifiers = modifiers;
                     egui::Event::PointerButton { pos: at(x, y), button, pressed, modifiers }
                 }
             });
+        }
+        if self.script_mods != egui::Modifiers::NONE {
+            raw.modifiers = self.script_mods;
         }
     }
 
@@ -2147,7 +2160,7 @@ fn parse_script(text: &str) -> Vec<(u32, ScriptEvent)> {
         let w: Vec<&str> = step.split_whitespace().collect();
         let num = |i: usize| w.get(i).and_then(|v| v.parse::<f32>().ok()).unwrap_or(0.0);
         let mods = match w.last().copied() {
-            Some("ctrl") => egui::Modifiers::COMMAND,
+            Some("ctrl") => egui::Modifiers::CTRL | egui::Modifiers::COMMAND,
             Some("shift") => egui::Modifiers::SHIFT,
             _ => egui::Modifiers::NONE,
         };
