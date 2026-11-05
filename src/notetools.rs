@@ -432,3 +432,142 @@ mod tests3 {
         }
     }
 }
+
+// ---------------------------------------------------------------- scales, chords, ramps
+
+/// Each key to the nearest key of the scale (`root` 0 = C, offsets 0..=11); a tie goes down.
+pub fn snap_to_scale(notes: &mut [Note], root: u8, scale: &[u8]) {
+    if scale.is_empty() {
+        return;
+    }
+    for note in notes {
+        let k = note.key;
+        let mut best_t = 0u8;
+        let mut best_dist = i32::MAX;
+        for t in 0..=127u8 {
+            let pitch_class = (t as i32 - root as i32).rem_euclid(12) as u8;
+            if scale.contains(&pitch_class) {
+                let dist = (k as i32 - t as i32).abs();
+                if dist < best_dist || (dist == best_dist && t < best_t) {
+                    best_dist = dist;
+                    best_t = t;
+                }
+            }
+        }
+        note.key = best_t;
+    }
+}
+
+/// Each note followed by a copy per interval above it (copies above key 127 are skipped).
+pub fn make_chords(notes: &[Note], intervals: &[u8]) -> Vec<Note> {
+    let mut result = Vec::new();
+    for note in notes {
+        result.push(*note);
+        for &interval in intervals {
+            let new_key = note.key as u16 + interval as u16;
+            if new_key <= 127 {
+                result.push(Note { key: new_key as u8, ..*note });
+            }
+        }
+    }
+    result
+}
+
+/// Velocities from `from` (earliest note) to `to` (latest), in a straight line.
+pub fn velocity_ramp(notes: &mut [Note], from: u8, to: u8) {
+    let n = notes.len();
+    if n == 0 {
+        return;
+    }
+    let mut order: Vec<usize> = (0..n).collect();
+    // Stable sort: ties keep their slice order.
+    order.sort_by_key(|&i| notes[i].start);
+    for (pos, i) in order.into_iter().enumerate() {
+        let v = if n == 1 {
+            from as f64
+        } else {
+            from as f64 + (to as f64 - from as f64) * (pos as f64 / (n - 1) as f64)
+        };
+        notes[i].vel = (v.round() as i32).clamp(1, 127) as u8;
+    }
+}
+
+#[cfg(test)]
+mod tests4 {
+    use super::*;
+
+    fn n(key: u8, start: u32) -> Note {
+        Note { key, start, len: 24, vel: 100 }
+    }
+
+    #[test]
+    fn test_snap_to_scale() {
+        let mut notes = vec![
+            n(61, 0),
+            n(63, 0),
+            n(66, 0),
+            n(60, 0),
+            n(127, 0),
+        ];
+        let major = [0, 2, 4, 5, 7, 9, 11];
+        snap_to_scale(&mut notes, 0, &major);
+        assert_eq!(notes[0].key, 60);
+        assert_eq!(notes[1].key, 62);
+        assert_eq!(notes[2].key, 65);
+        assert_eq!(notes[3].key, 60);
+        assert_eq!(notes[4].key, 127);
+
+        let mut notes2 = vec![
+            n(61, 0),
+            n(63, 0),
+            n(66, 0),
+            n(60, 0),
+            n(127, 0),
+        ];
+        snap_to_scale(&mut notes2, 2, &major);
+        assert_eq!(notes2[3].key, 59);
+
+        let mut notes3 = vec![n(60, 0)];
+        snap_to_scale(&mut notes3, 0, &[]);
+        assert_eq!(notes3[0].key, 60);
+    }
+
+    #[test]
+    fn test_make_chords() {
+        let notes = vec![
+            n(60, 0),
+            n(125, 24),
+        ];
+        let chords = make_chords(&notes, &[4, 7]);
+        assert_eq!(chords.len(), 4);
+        assert_eq!(chords[0].key, 60);
+        assert_eq!(chords[1].key, 64);
+        assert_eq!(chords[2].key, 67);
+        assert_eq!(chords[3].key, 125);
+    }
+
+    #[test]
+    fn test_velocity_ramp() {
+        let mut notes = vec![
+            n(60, 48),
+            n(60, 0),
+            n(60, 24),
+            n(60, 72),
+            n(60, 96),
+        ];
+        velocity_ramp(&mut notes, 20, 100);
+        assert_eq!(notes[0].vel, 60);
+        assert_eq!(notes[1].vel, 20);
+        assert_eq!(notes[2].vel, 40);
+        assert_eq!(notes[3].vel, 80);
+        assert_eq!(notes[4].vel, 100);
+        let mut one = vec![n(60, 0)];
+        velocity_ramp(&mut one, 20, 100);
+        assert_eq!(one[0].vel, 20);
+    }
+
+    #[test]
+    fn chords_never_overflow() {
+        assert_eq!(make_chords(&[n(127, 0)], &[200]), vec![n(127, 0)]);
+    }
+}

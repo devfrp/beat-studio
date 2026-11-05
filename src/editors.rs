@@ -319,14 +319,20 @@ impl StudioApp {
                 }
             }
             NoteTool::FlipKeys => notetools::flip_keys(&mut notes),
+            NoteTool::Scale(root, si) => notetools::snap_to_scale(&mut notes, root, SCALES[si].1),
+            NoteTool::Crescendo => notetools::velocity_ramp(&mut notes, 40, 120),
+            NoteTool::Decrescendo => notetools::velocity_ramp(&mut notes, 120, 40),
             NoteTool::Arpeggiate => notetools::arpeggiate(&mut notes, TICKS_PER_STEP),
             NoteTool::Humanize => {
                 // A new variation each time.
                 let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.subsec_nanos());
                 notetools::humanize(&mut notes, 12, seed);
             }
-            NoteTool::Chop => {
-                let pieces = notetools::chop(&notes, TICKS_PER_STEP);
+            NoteTool::Chop | NoteTool::Chord(_) => {
+                let pieces = match tool {
+                    NoteTool::Chord(ci) => notetools::make_chords(&notes, CHORDS[ci].1),
+                    _ => notetools::chop(&notes, TICKS_PER_STEP),
+                };
                 let mut rest: Vec<Note> = list.iter().enumerate().filter(|(i, _)| !picked.contains(i)).map(|(_, n)| *n).collect();
                 let first = rest.len();
                 rest.extend(pieces);
@@ -370,6 +376,33 @@ impl StudioApp {
                     (NoteTool::Humanize, "Humanize velocity", "Vary the velocities a little"),
                 ] {
                     if ui.button(label).on_hover_text(tip).clicked() {
+                        self.note_tool(p, pat, ch, tool);
+                        ui.close_menu();
+                    }
+                }
+                ui.separator();
+                ui.menu_button("Snap to scale", |ui| {
+                    for (root, name) in KEY_NAMES.iter().enumerate() {
+                        ui.menu_button(*name, |ui| {
+                            for (si, (scale, _)) in SCALES.iter().enumerate() {
+                                if ui.button(format!("{name} {scale}")).clicked() {
+                                    self.note_tool(p, pat, ch, NoteTool::Scale(root as u8, si));
+                                    ui.close_menu();
+                                }
+                            }
+                        });
+                    }
+                });
+                ui.menu_button("Chords", |ui| {
+                    for (ci, (chord, _)) in CHORDS.iter().enumerate() {
+                        if ui.button(*chord).clicked() {
+                            self.note_tool(p, pat, ch, NoteTool::Chord(ci));
+                            ui.close_menu();
+                        }
+                    }
+                });
+                for (tool, label) in [(NoteTool::Crescendo, "Crescendo"), (NoteTool::Decrescendo, "Decrescendo")] {
+                    if ui.button(label).on_hover_text("Velocities rise or fall from the first note to the last").clicked() {
                         self.note_tool(p, pat, ch, tool);
                         ui.close_menu();
                     }
@@ -1094,4 +1127,19 @@ enum NoteTool {
     FlipKeys,
     Arpeggiate,
     Humanize,
+    /// Root (0 = C), index in SCALES.
+    Scale(u8, usize),
+    /// Index in CHORDS.
+    Chord(usize),
+    Crescendo,
+    Decrescendo,
 }
+
+const KEY_NAMES: [&str; 12] = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+const SCALES: [(&str, &[u8]); 4] = [
+    ("major", &[0, 2, 4, 5, 7, 9, 11]),
+    ("minor", &[0, 2, 3, 5, 7, 8, 10]),
+    ("major pentatonic", &[0, 2, 4, 7, 9]),
+    ("minor pentatonic", &[0, 3, 5, 7, 10]),
+];
+const CHORDS: [(&str, &[u8]); 4] = [("Major", &[4, 7]), ("Minor", &[3, 7]), ("Seventh", &[4, 7, 10]), ("Power (5th + octave)", &[7, 12])];
