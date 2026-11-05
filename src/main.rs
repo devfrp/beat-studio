@@ -1,3 +1,4 @@
+mod arrange;
 mod audiofile;
 mod editors;
 mod effects;

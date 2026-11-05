@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex};
 
 use eframe::egui::{self, pos2, vec2, Align2, Color32, FontId, Key, Pos2, Rect, Sense, Stroke, Ui};
 
+use crate::arrange;
 use crate::audiofile;
 use crate::engine::{
     self, Automation, Clip, Instrument, Mode, Note, Project, SampleData, Shared, Target, BEATS_PER_BAR, PLAYLIST_TRACKS, STEPS_PER_BAR,
@@ -294,6 +295,8 @@ pub struct StudioApp {
     pub auto_drag: Option<(usize, usize)>,
     /// Free drawing on an automation lane (clip, last tick, last value).
     pub auto_draw: Option<(usize, u32, f32)>,
+    /// Bar the playlist ruler was right-clicked on.
+    pub ruler_bar: u32,
     mp3_ok: bool,
 }
 
@@ -400,6 +403,7 @@ impl StudioApp {
             take: None,
             auto_drag: None,
             auto_draw: None,
+            ruler_bar: 0,
             mp3_ok: audiofile::mp3_available(),
         };
         if app.screenshot.is_none() {
@@ -1783,6 +1787,29 @@ impl StudioApp {
             painter.text(pos2(x + 3.0, ruler.center().y), Align2::LEFT_CENTER, format!("{}", b + 1), FontId::proportional(10.0), TEXT_DIM);
         }
         let rr = ui.interact(ruler, ui.id().with("ruler"), Sense::click());
+        if rr.secondary_clicked() {
+            if let Some(pp) = rr.interact_pointer_pos() {
+                self.ruler_bar = ((pp.x - grid.left()) / bar_w).floor().max(0.0) as u32;
+            }
+        }
+        let at = self.ruler_bar;
+        rr.context_menu(|ui| {
+            ui.label(egui::RichText::new(format!("Bar {}", at + 1)).color(TEXT_DIM).size(10.0));
+            if ui.button("Insert a bar here").on_hover_text("Clips and automation from here move one bar later").clicked() {
+                arrange::insert_bars(&mut p.clips, at, 1);
+                for a in &mut p.automations {
+                    arrange::insert_ticks(&mut a.points, at * TICKS_PER_BAR, TICKS_PER_BAR);
+                }
+                ui.close_menu();
+            }
+            if ui.button("Delete this bar").on_hover_text("Removes the clips starting in it; what follows moves one bar earlier").clicked() {
+                arrange::delete_bars(&mut p.clips, at, 1);
+                for a in &mut p.automations {
+                    arrange::delete_ticks(&mut a.points, at * TICKS_PER_BAR, TICKS_PER_BAR);
+                }
+                ui.close_menu();
+            }
+        });
         if rr.clicked() {
             if let Some(pp) = rr.interact_pointer_pos() {
                 let bar = ((pp.x - grid.left()) / bar_w).floor().max(0.0) as u32;

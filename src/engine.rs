@@ -171,7 +171,7 @@ impl Pattern {
     }
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Clip {
     pub track: usize,
     pub start_bar: u32,
