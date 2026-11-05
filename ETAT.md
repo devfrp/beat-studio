@@ -23,7 +23,8 @@
 Menu Tools du Piano roll jusqu'au riff (A minor), sous-menu Steps du Channel rack (Fill each 2 steps),
 clic droit sur la règle (insérer une mesure : blocs et automation suivent), Ctrl+glisser un bloc (copie),
 Maj+glisser sur un couloir d'automation (dessin), ajout d'un Chorus dans le Mixer,
-Piano roll au clavier : Ctrl+A (tout choisir), Ctrl+B (dupliquer), Maj+↑ (une octave).
+Piano roll au clavier : Ctrl+A (tout choisir), Ctrl+B (dupliquer), Maj+↑ (une octave),
+plugin instrument choisi au clic droit (Citrus) et sa fenêtre ouverte par « Plugin window ».
 
 ## Pas encore vérifié
 
@@ -31,7 +32,7 @@ Ces fonctions compilent et leur logique est testée, mais personne ne les a essa
 
 - Ctrl+glisser (cadre de sélection), Ctrl+C / Ctrl+V et couloir de vélocité dans le Piano roll ;
 - automation en mode PAT (à l'oreille) ;
-- fenêtre des paramètres d'un plugin et « Plugin window » depuis l'application (la fenêtre elle-même est vérifiée par le test) ;
+- fenêtre des paramètres d'un plugin ;
 - son du Chorus et du Phaser (à l'oreille), export par piste depuis le menu ;
 - prise réelle au micro.
 

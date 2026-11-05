@@ -217,6 +217,8 @@ pub struct StudioApp {
     /// Developer check: pointer events replayed before the screenshot
     /// (frame, event in screenshot pixels), from BEATSTUDIO_INPUT.
     script: Vec<(u32, ScriptEvent)>,
+    /// Frame where the script (trailing waits included) is over.
+    script_end: u32,
     /// Keys held by the script between a press and its release.
     script_mods: egui::Modifiers,
     shot_requested: bool,
@@ -337,6 +339,7 @@ impl StudioApp {
             shared,
             _stream: stream,
             script: Vec::new(),
+            script_end: 0,
             script_mods: egui::Modifiers::NONE,
             screenshot,
             frames: 0,
@@ -418,7 +421,7 @@ impl StudioApp {
         };
         if app.screenshot.is_some() {
             if let Ok(text) = std::env::var("BEATSTUDIO_INPUT") {
-                app.script = parse_script(&text);
+                (app.script, app.script_end) = parse_script(&text);
             }
         }
         // Developer check: only these windows, e.g. BEATSTUDIO_SHOW=piano,playlist.
@@ -430,7 +433,8 @@ impl StudioApp {
             app.show_piano = on("piano");
             app.show_mixer = on("mixer");
         }
-        if app.screenshot.is_none() {
+        // Developer check: BEATSTUDIO_PLUGINS=1 reads the saved plugin list in screenshot mode too.
+        if app.screenshot.is_none() || std::env::var_os("BEATSTUDIO_PLUGINS").is_some() {
             app.load_plugin_list();
         }
         app
@@ -826,8 +830,7 @@ impl StudioApp {
         let Some(path) = self.screenshot.clone() else { return };
         self.frames += 1;
         ctx.request_repaint();
-        let script_end = self.script.last().map_or(0, |e| e.0 + 30);
-        if self.frames >= 120.max(script_end) && !self.shot_requested {
+        if self.frames >= 120.max(self.script_end + 30) && !self.shot_requested {
             self.shot_requested = true;
             ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot);
         }
@@ -2158,7 +2161,7 @@ enum ScriptEvent {
 /// Reads BEATSTUDIO_INPUT: actions separated by ";", in screenshot pixels:
 /// `click x y [ctrl|shift]`, `rclick x y`, `move x y`, `drag x1 y1 x2 y2 [ctrl|shift]`,
 /// `key ctrl+a` (egui key names: `Delete`, `ArrowUp`...), `wait frames`. Each action starts a few frames after the previous one.
-fn parse_script(text: &str) -> Vec<(u32, ScriptEvent)> {
+fn parse_script(text: &str) -> (Vec<(u32, ScriptEvent)>, u32) {
     let mut out = Vec::new();
     let mut f = 20u32;
     for step in text.split(';') {
@@ -2217,5 +2220,5 @@ fn parse_script(text: &str) -> Vec<(u32, ScriptEvent)> {
             _ => {}
         }
     }
-    out
+    (out, f)
 }
