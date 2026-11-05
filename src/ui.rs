@@ -2091,6 +2091,10 @@ impl eframe::App for StudioApp {
             let at = |x: f32, y: f32| pos2(x / ppp, y / ppp);
             raw.events.push(match *e {
                 ScriptEvent::Move(x, y) => egui::Event::PointerMoved(at(x, y)),
+                ScriptEvent::Key(key, pressed, modifiers) => {
+                    raw.modifiers = modifiers;
+                    egui::Event::Key { key, physical_key: None, pressed, repeat: false, modifiers }
+                }
                 ScriptEvent::Button(x, y, button, pressed, modifiers) => {
                     // Held from the press to the release, like a real key.
                     self.script_mods = if pressed { modifiers } else { egui::Modifiers::NONE };
@@ -2147,12 +2151,13 @@ impl eframe::App for StudioApp {
 #[derive(Clone, Copy)]
 enum ScriptEvent {
     Move(f32, f32),
+    Key(egui::Key, bool, egui::Modifiers),
     Button(f32, f32, egui::PointerButton, bool, egui::Modifiers),
 }
 
 /// Reads BEATSTUDIO_INPUT: actions separated by ";", in screenshot pixels:
 /// `click x y [ctrl|shift]`, `rclick x y`, `move x y`, `drag x1 y1 x2 y2 [ctrl|shift]`,
-/// `wait frames`. Each action starts a few frames after the previous one.
+/// `key ctrl+a` (egui key names: `Delete`, `ArrowUp`...), `wait frames`. Each action starts a few frames after the previous one.
 fn parse_script(text: &str) -> Vec<(u32, ScriptEvent)> {
     let mut out = Vec::new();
     let mut f = 20u32;
@@ -2184,6 +2189,25 @@ fn parse_script(text: &str) -> Vec<(u32, ScriptEvent)> {
                 }
                 out.push((f + 22, press(x2, y2, egui::PointerButton::Primary, false, mods)));
                 f += 32;
+            }
+            Some("key") => {
+                // key ctrl+shift+z, key delete, key arrowup...
+                let combo = w.get(1).copied().unwrap_or("");
+                let mut m = egui::Modifiers::NONE;
+                let mut key = None;
+                for part in combo.split('+') {
+                    match part {
+                        "ctrl" => m = m | egui::Modifiers::CTRL | egui::Modifiers::COMMAND,
+                        "shift" => m = m | egui::Modifiers::SHIFT,
+                        "alt" => m = m | egui::Modifiers::ALT,
+                        name => key = egui::Key::from_name(&name[..1].to_uppercase()).filter(|_| name.len() == 1).or_else(|| egui::Key::from_name(name)),
+                    }
+                }
+                if let Some(k) = key {
+                    out.push((f, ScriptEvent::Key(k, true, m)));
+                    out.push((f + 2, ScriptEvent::Key(k, false, m)));
+                }
+                f += 8;
             }
             Some("move") => {
                 out.push((f, ScriptEvent::Move(num(1), num(2))));
