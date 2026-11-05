@@ -1,6 +1,6 @@
-// CLAP plugin hosting: scanning, loading, sound processing, parameters and
-// saved state. The plugin's own window is not shown; its parameters get
-// generic sliders instead. Scanning runs each file in a child process
+// CLAP plugin hosting: scanning, loading, sound processing, parameters,
+// saved state and the plugin's own window (X11, embedded in a window of ours
+// or floating). Its parameters also get generic sliders. Scanning runs each file in a child process
 // (`beatstudio --clap-scan <file>`) so a plugin that crashes cannot take the
 // studio down with it.
 
@@ -8,7 +8,8 @@ use std::collections::HashMap;
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::path::{Path, PathBuf};
 use std::ptr;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::time::{Duration, Instant};
 use std::sync::{Mutex, OnceLock};
 
 // ---------------------------------------------------------------- CLAP ABI
@@ -248,7 +249,81 @@ struct ClapPluginState {
     load: unsafe extern "C" fn(*const ClapPlugin, *const ClapIStream) -> bool,
 }
 
+/// A window handed to the plugin (`clap_window_t`, X11 id).
+#[repr(C)]
+struct ClapWindow {
+    api: *const c_char,
+    x11: std::ffi::c_ulong,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct ClapPluginGui {
+    is_api_supported: unsafe extern "C" fn(*const ClapPlugin, *const c_char, bool) -> bool,
+    get_preferred_api: Option<unsafe extern "C" fn(*const ClapPlugin, *mut *const c_char, *mut bool) -> bool>,
+    create: unsafe extern "C" fn(*const ClapPlugin, *const c_char, bool) -> bool,
+    destroy: unsafe extern "C" fn(*const ClapPlugin),
+    set_scale: Option<unsafe extern "C" fn(*const ClapPlugin, f64) -> bool>,
+    get_size: unsafe extern "C" fn(*const ClapPlugin, *mut u32, *mut u32) -> bool,
+    can_resize: Option<unsafe extern "C" fn(*const ClapPlugin) -> bool>,
+    get_resize_hints: Option<unsafe extern "C" fn(*const ClapPlugin, *mut c_void) -> bool>,
+    adjust_size: Option<unsafe extern "C" fn(*const ClapPlugin, *mut u32, *mut u32) -> bool>,
+    set_size: Option<unsafe extern "C" fn(*const ClapPlugin, u32, u32) -> bool>,
+    set_parent: unsafe extern "C" fn(*const ClapPlugin, *const ClapWindow) -> bool,
+    set_transient: Option<unsafe extern "C" fn(*const ClapPlugin, *const ClapWindow) -> bool>,
+    suggest_title: Option<unsafe extern "C" fn(*const ClapPlugin, *const c_char)>,
+    show: unsafe extern "C" fn(*const ClapPlugin) -> bool,
+    hide: Option<unsafe extern "C" fn(*const ClapPlugin) -> bool>,
+}
+
+#[repr(C)]
+struct ClapPluginTimerSupport {
+    on_timer: unsafe extern "C" fn(*const ClapPlugin, u32),
+}
+
+#[repr(C)]
+struct ClapPluginPosixFdSupport {
+    on_fd: unsafe extern "C" fn(*const ClapPlugin, i32, u32),
+}
+
+#[repr(C)]
+struct ClapHostGui {
+    resize_hints_changed: unsafe extern "C" fn(*const ClapHost),
+    request_resize: unsafe extern "C" fn(*const ClapHost, u32, u32) -> bool,
+    request_show: unsafe extern "C" fn(*const ClapHost) -> bool,
+    request_hide: unsafe extern "C" fn(*const ClapHost) -> bool,
+    closed: unsafe extern "C" fn(*const ClapHost, bool),
+}
+
+#[repr(C)]
+struct ClapHostTimerSupport {
+    register_timer: unsafe extern "C" fn(*const ClapHost, u32, *mut u32) -> bool,
+    unregister_timer: unsafe extern "C" fn(*const ClapHost, u32) -> bool,
+}
+
+#[repr(C)]
+struct ClapHostPosixFdSupport {
+    register_fd: unsafe extern "C" fn(*const ClapHost, i32, u32) -> bool,
+    modify_fd: unsafe extern "C" fn(*const ClapHost, i32, u32) -> bool,
+    unregister_fd: unsafe extern "C" fn(*const ClapHost, i32) -> bool,
+}
+
+const FD_READ: u32 = 1 << 0;
+const FD_WRITE: u32 = 1 << 1;
+const FD_ERROR: u32 = 1 << 2;
+
+#[repr(C)]
+struct PollFd {
+    fd: i32,
+    events: i16,
+    revents: i16,
+}
+const POLLIN: i16 = 0x1;
+const POLLOUT: i16 = 0x4;
+const POLLERR: i16 = 0x8;
+
 extern "C" {
+    fn poll(fds: *mut PollFd, nfds: std::ffi::c_ulong, timeout: i32) -> i32;
     fn dlopen(filename: *const c_char, flag: i32) -> *mut c_void;
     fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
     fn dlerror() -> *const c_char;
@@ -449,23 +524,115 @@ pub fn cache_from_text(text: &str) -> Vec<PluginInfo> {
 
 // ---------------------------------------------------------------- host side
 
+struct Timer {
+    id: u32,
+    period: Duration,
+    next: Instant,
+}
+
 /// What the plugin asked of the host from any thread.
+#[derive(Default)]
 struct HostFlags {
     callback: AtomicBool,
     restart: AtomicBool,
+    /// The plugin's floating window was closed, or its window connection lost.
+    gui_closed: AtomicBool,
+    /// Size the plugin asked its window to take.
+    gui_resize: Mutex<Option<(u32, u32)>>,
+    timers: Mutex<Vec<Timer>>,
+    next_timer: AtomicU32,
+    /// File descriptors to watch, with CLAP flags.
+    fds: Mutex<Vec<(i32, u32)>>,
 }
 
-unsafe extern "C" fn host_get_extension(_: *const ClapHost, _: *const c_char) -> *const c_void {
-    ptr::null()
+unsafe fn flags_of<'a>(h: *const ClapHost) -> &'a HostFlags {
+    &*((*h).host_data as *const HostFlags)
+}
+
+unsafe extern "C" fn gui_resize_hints_changed(_: *const ClapHost) {}
+unsafe extern "C" fn gui_request_resize(h: *const ClapHost, w: u32, ht: u32) -> bool {
+    if let Ok(mut r) = flags_of(h).gui_resize.lock() {
+        *r = Some((w, ht));
+    }
+    true
+}
+unsafe extern "C" fn gui_request_show(_: *const ClapHost) -> bool {
+    false
+}
+unsafe extern "C" fn gui_request_hide(_: *const ClapHost) -> bool {
+    false
+}
+unsafe extern "C" fn gui_closed(h: *const ClapHost, _was_destroyed: bool) {
+    flags_of(h).gui_closed.store(true, Ordering::Relaxed);
+}
+static HOST_GUI: ClapHostGui = ClapHostGui {
+    resize_hints_changed: gui_resize_hints_changed,
+    request_resize: gui_request_resize,
+    request_show: gui_request_show,
+    request_hide: gui_request_hide,
+    closed: gui_closed,
+};
+
+unsafe extern "C" fn timer_register(h: *const ClapHost, period_ms: u32, id: *mut u32) -> bool {
+    let f = flags_of(h);
+    let new = f.next_timer.fetch_add(1, Ordering::Relaxed);
+    let period = Duration::from_millis(period_ms.max(1) as u64);
+    let Ok(mut t) = f.timers.lock() else { return false };
+    t.push(Timer { id: new, period, next: Instant::now() + period });
+    if !id.is_null() {
+        *id = new;
+    }
+    true
+}
+unsafe extern "C" fn timer_unregister(h: *const ClapHost, id: u32) -> bool {
+    let Ok(mut t) = flags_of(h).timers.lock() else { return false };
+    let before = t.len();
+    t.retain(|x| x.id != id);
+    t.len() != before
+}
+static HOST_TIMERS: ClapHostTimerSupport = ClapHostTimerSupport { register_timer: timer_register, unregister_timer: timer_unregister };
+
+unsafe extern "C" fn fd_register(h: *const ClapHost, fd: i32, flags: u32) -> bool {
+    let Ok(mut l) = flags_of(h).fds.lock() else { return false };
+    l.retain(|x| x.0 != fd);
+    l.push((fd, flags));
+    true
+}
+unsafe extern "C" fn fd_modify(h: *const ClapHost, fd: i32, flags: u32) -> bool {
+    let Ok(mut l) = flags_of(h).fds.lock() else { return false };
+    match l.iter_mut().find(|x| x.0 == fd) {
+        Some(x) => {
+            x.1 = flags;
+            true
+        }
+        None => false,
+    }
+}
+unsafe extern "C" fn fd_unregister(h: *const ClapHost, fd: i32) -> bool {
+    let Ok(mut l) = flags_of(h).fds.lock() else { return false };
+    let before = l.len();
+    l.retain(|x| x.0 != fd);
+    l.len() != before
+}
+static HOST_FDS: ClapHostPosixFdSupport = ClapHostPosixFdSupport { register_fd: fd_register, modify_fd: fd_modify, unregister_fd: fd_unregister };
+
+unsafe extern "C" fn host_get_extension(_: *const ClapHost, id: *const c_char) -> *const c_void {
+    if id.is_null() {
+        return ptr::null();
+    }
+    match CStr::from_ptr(id).to_bytes() {
+        b"clap.gui" => &HOST_GUI as *const ClapHostGui as *const c_void,
+        b"clap.timer-support" => &HOST_TIMERS as *const ClapHostTimerSupport as *const c_void,
+        b"clap.posix-fd-support" => &HOST_FDS as *const ClapHostPosixFdSupport as *const c_void,
+        _ => ptr::null(),
+    }
 }
 unsafe extern "C" fn host_request_restart(h: *const ClapHost) {
-    let flags = &*((*h).host_data as *const HostFlags);
-    flags.restart.store(true, Ordering::Relaxed);
+    flags_of(h).restart.store(true, Ordering::Relaxed);
 }
 unsafe extern "C" fn host_request_process(_: *const ClapHost) {}
 unsafe extern "C" fn host_request_callback(h: *const ClapHost) {
-    let flags = &*((*h).host_data as *const HostFlags);
-    flags.callback.store(true, Ordering::Relaxed);
+    flags_of(h).callback.store(true, Ordering::Relaxed);
 }
 
 unsafe extern "C" fn events_size(list: *const ClapInputEvents) -> u32 {
@@ -536,6 +703,9 @@ struct Instance {
     events: Vec<RawEvent>,
     /// Inputs then outputs, one Vec per channel, MAX_FRAMES long.
     scratch: Vec<Vec<f32>>,
+    /// The plugin's own window, when open. `None` inside: a floating window
+    /// the plugin made itself.
+    gui: Option<Option<crate::x11::Window>>,
 }
 
 unsafe impl Send for Instance {}
@@ -543,7 +713,7 @@ unsafe impl Send for Instance {}
 impl Instance {
     fn new(info: &PluginInfo, rate: f64) -> Result<Instance, String> {
         let strings = [c"Beat Studio".to_owned(), c"Beat Studio".to_owned(), c"".to_owned(), c"0.1".to_owned()];
-        let mut flags = Box::new(HostFlags { callback: AtomicBool::new(false), restart: AtomicBool::new(false) });
+        let mut flags = Box::<HostFlags>::default();
         let host = Box::new(ClapHost {
             clap_version: CLAP_VERSION,
             host_data: &mut *flags as *mut HostFlags as *mut c_void,
@@ -575,6 +745,7 @@ impl Instance {
             steady: 0,
             events: Vec::new(),
             scratch: Vec::new(),
+            gui: None,
         };
         if !unsafe { ((*plugin).init)(plugin) } {
             unsafe { ((*plugin).destroy)(plugin) };
@@ -590,6 +761,177 @@ impl Instance {
     fn ext<T>(&self, id: &CStr) -> Option<&T> {
         let p = unsafe { ((*self.plugin).get_extension)(self.plugin, id.as_ptr()) } as *const T;
         unsafe { p.as_ref() }
+    }
+
+    fn gui_ext(&self) -> Option<ClapPluginGui> {
+        self.ext::<ClapPluginGui>(c"clap.gui").copied()
+    }
+
+    /// True when the plugin can show its own X11 window (embedded or floating).
+    fn has_gui(&self) -> bool {
+        let Some(g) = self.gui_ext() else { return false };
+        let api = c"x11".as_ptr();
+        unsafe { (g.is_api_supported)(self.plugin, api, false) || (g.is_api_supported)(self.plugin, api, true) }
+    }
+
+    /// Opens the plugin's own window: inside a window of ours when the plugin
+    /// can be embedded, else its own floating window.
+    fn open_gui(&mut self, title: &str) -> Result<(), String> {
+        if self.gui.is_some() {
+            return Ok(());
+        }
+        let g = self.gui_ext().ok_or("this plugin has no window of its own")?;
+        let p = self.plugin;
+        let api = c"x11".as_ptr();
+        let embedded = unsafe { (g.is_api_supported)(p, api, false) };
+        if !embedded && !unsafe { (g.is_api_supported)(p, api, true) } {
+            return Err("this plugin has no X11 window".into());
+        }
+        if !unsafe { (g.create)(p, api, !embedded) } {
+            return Err("the plugin could not make its window".into());
+        }
+        let ctitle = CString::new(title.replace('\0', "")).unwrap_or_default();
+        let window = if embedded {
+            let (mut w, mut h) = (640u32, 480u32);
+            unsafe { (g.get_size)(p, &mut w, &mut h) };
+            let resizable = g.can_resize.is_some_and(|f| unsafe { f(p) });
+            let win = match crate::x11::Window::new(&ctitle, w.clamp(50, 8000), h.clamp(50, 8000), resizable) {
+                Ok(win) => win,
+                Err(e) => {
+                    unsafe { (g.destroy)(p) };
+                    return Err(e);
+                }
+            };
+            let cw = ClapWindow { api, x11: win.id() };
+            if !unsafe { (g.set_parent)(p, &cw) } {
+                unsafe { (g.destroy)(p) };
+                return Err("the plugin refused our window".into());
+            }
+            Some(win)
+        } else {
+            if let Some(f) = g.suggest_title {
+                unsafe { f(p, ctitle.as_ptr()) };
+            }
+            None
+        };
+        self.flags.gui_closed.store(false, Ordering::Relaxed);
+        if let Ok(mut r) = self.flags.gui_resize.lock() {
+            *r = None;
+        }
+        unsafe { (g.show)(p) };
+        if let Some(win) = &window {
+            win.show();
+        }
+        self.gui = Some(window);
+        Ok(())
+    }
+
+    fn close_gui(&mut self) {
+        let Some(window) = self.gui.take() else { return };
+        if let Some(g) = self.gui_ext() {
+            if let Some(hide) = g.hide {
+                unsafe { hide(self.plugin) };
+            }
+            unsafe { (g.destroy)(self.plugin) };
+        }
+        // Our window goes only once the plugin has let go of it.
+        drop(window);
+    }
+
+    /// The window was closed, resized by the user, or the plugin asked for a size.
+    fn gui_events(&mut self) {
+        if self.gui.is_none() {
+            return;
+        }
+        if self.flags.gui_closed.swap(false, Ordering::Relaxed) {
+            self.close_gui();
+            return;
+        }
+        let asked = self.flags.gui_resize.lock().ok().and_then(|mut r| r.take());
+        let resizable = asked.is_some() && self.gui_ext().and_then(|g| g.can_resize).is_some_and(|f| unsafe { f(self.plugin) });
+        let Some(Some(win)) = &mut self.gui else { return };
+        let ev = win.events();
+        if let Some((w, h)) = asked {
+            win.resize(w, h, resizable);
+        }
+        if ev.closed {
+            self.close_gui();
+            return;
+        }
+        if let (Some((mut w, mut h)), Some(g)) = (ev.resized, self.gui_ext()) {
+            let resizable = g.can_resize.is_some_and(|f| unsafe { f(self.plugin) });
+            if let (true, Some(set)) = (resizable, g.set_size) {
+                if let Some(adjust) = g.adjust_size {
+                    unsafe { adjust(self.plugin, &mut w, &mut h) };
+                }
+                unsafe { set(self.plugin, w, h) };
+            }
+        }
+    }
+
+    fn run_timers(&mut self) {
+        let now = Instant::now();
+        let due: Vec<u32> = match self.flags.timers.lock() {
+            Ok(mut t) => t
+                .iter_mut()
+                .filter(|x| now >= x.next)
+                .map(|x| {
+                    x.next = now + x.period;
+                    x.id
+                })
+                .collect(),
+            Err(_) => return,
+        };
+        if due.is_empty() {
+            return;
+        }
+        if let Some(ts) = self.ext::<ClapPluginTimerSupport>(c"clap.timer-support") {
+            for id in due {
+                unsafe { (ts.on_timer)(self.plugin, id) };
+            }
+        }
+    }
+
+    fn watch_fds(&mut self) {
+        let fds = match self.flags.fds.lock() {
+            Ok(l) if !l.is_empty() => l.clone(),
+            _ => return,
+        };
+        let mut list: Vec<PollFd> = fds
+            .iter()
+            .map(|&(fd, f)| {
+                let mut events = 0;
+                if f & FD_READ != 0 {
+                    events |= POLLIN;
+                }
+                if f & FD_WRITE != 0 {
+                    events |= POLLOUT;
+                }
+                if f & FD_ERROR != 0 {
+                    events |= POLLERR;
+                }
+                PollFd { fd, events, revents: 0 }
+            })
+            .collect();
+        if unsafe { poll(list.as_mut_ptr(), list.len() as std::ffi::c_ulong, 0) } <= 0 {
+            return;
+        }
+        let Some(fs) = self.ext::<ClapPluginPosixFdSupport>(c"clap.posix-fd-support") else { return };
+        for q in &list {
+            let mut f = 0;
+            if q.revents & POLLIN != 0 {
+                f |= FD_READ;
+            }
+            if q.revents & POLLOUT != 0 {
+                f |= FD_WRITE;
+            }
+            if q.revents & POLLERR != 0 {
+                f |= FD_ERROR;
+            }
+            if f != 0 {
+                unsafe { (fs.on_fd)(self.plugin, q.fd, f) };
+            }
+        }
     }
 
     fn read_ports(&mut self) {
@@ -661,6 +1003,9 @@ impl Instance {
         if self.flags.callback.swap(false, Ordering::Relaxed) {
             unsafe { ((*self.plugin).on_main_thread)(self.plugin) };
         }
+        self.run_timers();
+        self.watch_fds();
+        self.gui_events();
         let restart = self.flags.restart.swap(false, Ordering::Relaxed);
         if restart || (rate != self.rate && rate > 0.0) {
             self.deactivate();
@@ -817,6 +1162,7 @@ impl Drop for Instance {
         if self.plugin.is_null() {
             return;
         }
+        self.close_gui();
         self.deactivate();
         unsafe { ((*self.plugin).destroy)(self.plugin) };
     }
@@ -878,6 +1224,19 @@ impl PluginCore {
     }
     pub fn idle(&mut self, rate: f32) {
         self.inst.idle(rate as f64);
+    }
+    /// The plugin can show its own window.
+    pub fn has_gui(&self) -> bool {
+        self.inst.has_gui()
+    }
+    pub fn gui_open(&self) -> bool {
+        self.inst.gui.is_some()
+    }
+    pub fn open_gui(&mut self, title: &str) -> Result<(), String> {
+        self.inst.open_gui(title)
+    }
+    pub fn close_gui(&mut self) {
+        self.inst.close_gui();
     }
 }
 
@@ -1045,5 +1404,47 @@ mod real {
                 println!("OK   {:28} effect     params={params:3} state={state:6} peak={loud:.3}", info.name);
             }
         }
+    }
+
+    #[test]
+    #[ignore = "opens real plugin windows (needs an X11 display)"]
+    fn real_plugin_windows_open_and_close() {
+        let me = std::env::current_exe().unwrap().parent().unwrap().parent().unwrap().join("beatstudio");
+        let mut seen = std::collections::HashSet::new();
+        let list: Vec<_> = scan_with(&me).into_iter().filter(|i| seen.insert(i.path.clone())).collect();
+        let mut opened = 0;
+        let only = std::env::var("BEATSTUDIO_GUI_ONLY").ok();
+        let hold = std::env::var("BEATSTUDIO_GUI_HOLD_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(600);
+        for info in list.iter().filter(|i| only.as_ref().is_none_or(|o| i.name.contains(o.as_str()))).take(12) {
+            let Ok(mut core) = PluginCore::load(info, 48000.0, None) else { continue };
+            if !core.has_gui() {
+                println!("--   {:28} no window", info.name);
+                continue;
+            }
+            match core.open_gui(&info.name) {
+                Ok(()) => {
+                    let start = Instant::now();
+                    while start.elapsed() < Duration::from_millis(hold) {
+                        core.idle(48000.0);
+                        std::thread::sleep(Duration::from_millis(16));
+                    }
+                    let kind = if matches!(core.inst.gui, Some(Some(_))) { "embedded" } else { "floating" };
+                    let timers = core.inst.flags.timers.lock().unwrap().len();
+                    let fds = core.inst.flags.fds.lock().unwrap().len();
+                    let win = match &core.inst.gui {
+                        Some(Some(w)) => format!("0x{:x}", w.id()),
+                        _ => "-".into(),
+                    };
+                    println!("     timers={timers} fds={fds} window={win}");
+                    assert!(core.gui_open(), "{} closed by itself", info.name);
+                    core.close_gui();
+                    assert!(!core.gui_open());
+                    opened += 1;
+                    println!("OK   {:28} {kind}", info.name);
+                }
+                Err(e) => println!("FAIL {:28} {e}", info.name),
+            }
+        }
+        assert!(opened > 0, "no plugin window opened");
     }
 }

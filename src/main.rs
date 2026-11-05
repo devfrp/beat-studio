@@ -11,6 +11,7 @@ mod smf;
 mod tools;
 mod ui;
 mod widgets;
+mod x11;
 
 use std::path::PathBuf;
 

@@ -388,8 +388,8 @@ impl StudioApp {
         p.mixer[insert].fx.iter().position(|e| e.is_none())
     }
 
-    /// Generic sliders for a plugin's parameters. The plugin's own window is
-    /// not shown (it would need the window system's embedding).
+    /// Generic sliders for a plugin's parameters, and the button that opens
+    /// the plugin's own window.
     pub fn plugin_params_window(&mut self, ctx: &egui::Context, p: &mut Project) {
         let Some(target) = self.plugin_window else { return };
         let (core, error, name) = match target {
@@ -420,13 +420,26 @@ impl StudioApp {
                     ui.colored_label(RED, error.unwrap_or_else(|| "Loading...".into()));
                     return;
                 };
+                if core.has_gui() {
+                    ui.horizontal(|ui| {
+                        if core.gui_open() {
+                            if ui.button("Close plugin window").clicked() {
+                                core.close_gui();
+                            }
+                        } else if ui.button("Open plugin window").on_hover_text("Shows the plugin's own interface").clicked() {
+                            if let Err(e) = core.open_gui(&name) {
+                                hint = Some(format!("its window could not open - {e}"));
+                            }
+                        }
+                    });
+                }
                 ui.horizontal(|ui| {
                     ui.label("Search");
                     ui.add(egui::TextEdit::singleline(filter).desired_width(180.0));
                     ui.label(egui::RichText::new(format!("{} parameters", core.params().len())).color(TEXT_DIM).size(11.0));
                 });
                 ui.label(
-                    egui::RichText::new("The plugin's own window cannot be shown here; all its settings are below. Double-click a name to reset it.")
+                    egui::RichText::new("All the plugin's settings are below. Double-click a name to reset it.")
                         .color(TEXT_DIM)
                         .size(10.0),
                 );

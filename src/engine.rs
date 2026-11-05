@@ -323,6 +323,37 @@ impl Automation {
     pub fn sort(&mut self) {
         self.points.sort_by_key(|p| p.0);
     }
+
+    /// Free drawing: the mouse moved from (t0, v0) to (t1, v1). Points in
+    /// [t0, t1] are replaced by one point per `step`, on the straight line.
+    pub fn draw(&mut self, t0: u32, v0: f32, t1: u32, v1: f32, step: u32) {
+        let min_t = t0.min(t1);
+        let max_t = t0.max(t1);
+
+        // Remove points with tick in [min_t, max_t]
+        self.points.retain(|&(t, _)| t < min_t || t > max_t);
+
+        if t0 == t1 {
+            // Only add (t1, v1)
+            self.points.push((t1, v1));
+        } else {
+            // Find the first multiple of step >= min_t
+            let mut t = if min_t.is_multiple_of(step) {
+                min_t
+            } else {
+                min_t + step - (min_t % step)
+            };
+            while t <= max_t {
+                let fraction = (t as f32 - t0 as f32) / (t1 as f32 - t0 as f32);
+                let value = v0 + (v1 - v0) * fraction;
+                self.points.push((t, value));
+                t += step;
+            }
+        }
+
+        // Sort by tick
+        self.points.sort_by_key(|&(t, _)| t);
+    }
 }
 
 pub struct Voice {
@@ -678,8 +709,22 @@ impl Project {
         (start as f64) > self.position || (step == 0 && self.position > (len - TICKS_PER_STEP) as f64)
     }
 
-    /// Values for this block: the saved ones, replaced by automation in song mode.
+    /// Where automation is read: the song position, or in pattern mode the
+    /// place of the pattern's first clip in the playlist plus the position
+    /// inside the pattern (None when the pattern is not in the playlist).
+    pub fn automation_tick(&self) -> Option<f64> {
+        match self.mode {
+            Mode::Song => Some(self.position),
+            Mode::Pattern => {
+                let start = self.clips.iter().filter(|c| c.pattern == self.current_pattern).map(|c| c.start_bar).min()?;
+                Some((start * TICKS_PER_BAR) as f64 + self.position)
+            }
+        }
+    }
+
+    /// Values for this block: the saved ones, replaced by automation.
     fn update_live(&mut self) {
+        let tick = self.automation_tick();
         let m = &mut self.mix;
         m.live_ch.clear();
         m.live_ch.extend(self.channels.iter().map(|c| (c.volume, c.pan)));
@@ -687,11 +732,9 @@ impl Project {
         m.live_mix.extend(self.mixer.iter().map(|t| (t.volume, t.pan)));
         m.live_fx.clear();
         m.live_tempo = self.tempo;
-        if self.mode != Mode::Song {
-            return;
-        }
+        let Some(tick) = tick else { return };
         for a in &self.automations {
-            let Some(v) = a.value_at(self.position) else { continue };
+            let Some(v) = a.value_at(tick) else { continue };
             match a.target {
                 Target::Tempo => m.live_tempo = (v as f64).clamp(TEMPO_MIN, TEMPO_MAX),
                 Target::ChannelVolume(c) => {
@@ -1382,5 +1425,49 @@ mod tests {
         p.remove_channel(1);
         assert_eq!(p.automations.len(), 1);
         assert_eq!(p.automations[0].target, Target::ChannelPan(2));
+    }
+}
+
+#[cfg(test)]
+mod draw_tests {
+    use super::*;
+
+    #[test]
+    fn test_right_draw() {
+        let mut auto = Automation {
+            target: Target::Tempo,
+            points: vec![(0, 5.0), (48, 5.0), (200, 5.0)],
+        };
+        auto.draw(0, 0.0, 96, 1.0, 24);
+        assert_eq!(
+            auto.points,
+            vec![(0, 0.0), (24, 0.25), (48, 0.5), (72, 0.75), (96, 1.0), (200, 5.0)]
+        );
+    }
+
+    #[test]
+    fn test_left_draw() {
+        let mut auto = Automation {
+            target: Target::Tempo,
+            points: vec![(0, 3.0)],
+        };
+        auto.draw(96, 1.0, 48, 0.0, 24);
+        assert_eq!(
+            auto.points,
+            vec![(0, 3.0), (48, 0.0), (72, 0.5), (96, 1.0)]
+        );
+    }
+
+    #[test]
+    fn test_same_t() {
+        let mut auto = Automation {
+            target: Target::Tempo,
+            points: vec![(30, 9.0)],
+        };
+        auto.draw(30, 9.0, 30, 2.0, 24);
+        assert_eq!(
+            auto.points,
+            vec![(30, 2.0)]
+        );
     }
 }

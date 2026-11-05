@@ -289,6 +289,8 @@ pub struct StudioApp {
     pub take: Option<TakeStart>,
     /// Automation point being dragged (clip, point).
     pub auto_drag: Option<(usize, usize)>,
+    /// Free drawing on an automation lane (clip, last tick, last value).
+    pub auto_draw: Option<(usize, u32, f32)>,
     mp3_ok: bool,
 }
 
@@ -394,6 +396,7 @@ impl StudioApp {
             input_failed: false,
             take: None,
             auto_drag: None,
+            auto_draw: None,
             mp3_ok: audiofile::mp3_available(),
         };
         if app.screenshot.is_none() {
@@ -1063,7 +1066,7 @@ impl StudioApp {
         let v = target.base_value(p).unwrap_or(hi).clamp(lo, hi);
         let end = p.song_length_ticks().max(4 * TICKS_PER_BAR);
         p.automations.push(Automation { target, points: vec![(0, v), (end, v)] });
-        self.hint = format!("Automation for {}: click its lane in the playlist to add points (song mode)", target.label(p));
+        self.hint = format!("Automation for {}: click or drag on its lane in the playlist (Shift+drag draws freely)", target.label(p));
     }
 
     // ---------------------------------------------------------------- top bar
@@ -1402,11 +1405,11 @@ impl StudioApp {
             p.metronome = !p.metronome;
         }
 
-        let automated = p.mode == Mode::Song && p.automations.iter().any(|a| a.target == Target::Tempo);
+        let automated = p.automation_tick().is_some() && p.automations.iter().any(|a| a.target == Target::Tempo);
         lcd(ui, |ui| {
             if automated {
                 ui.label(egui::RichText::new(format!("{:.3}", p.live_tempo())).color(ACCENT))
-                    .on_hover_text("The tempo follows its automation clip in song mode");
+                    .on_hover_text("The tempo follows its automation clip");
             } else {
                 let r = ui.add(egui::DragValue::new(&mut p.tempo).range(TEMPO_MIN..=TEMPO_MAX).speed(0.2).fixed_decimals(3));
                 p.tempo = engine::quantize_tempo(p.tempo);
@@ -1832,7 +1835,14 @@ impl StudioApp {
                 let t = ((x - grid.left()) / bar_w * TICKS_PER_BAR as f32).max(0.0);
                 ((t / TICKS_PER_STEP as f32).round() as u32) * TICKS_PER_STEP
             };
-            if lr.drag_started_by(egui::PointerButton::Primary) {
+            let shift = ui.input(|i| i.modifiers.shift);
+            if lr.drag_started_by(egui::PointerButton::Primary) && shift {
+                if let Some(pp) = lr.interact_pointer_pos() {
+                    let (t, v) = (snap(pp.x), y_val(pp.y));
+                    p.automations[ai].draw(t, v, t, v, TICKS_PER_STEP);
+                    self.auto_draw = Some((ai, t, v));
+                }
+            } else if lr.drag_started_by(egui::PointerButton::Primary) {
                 if let Some(k) = near {
                     self.auto_drag = Some((ai, k));
                 } else if let Some(pp) = lr.interact_pointer_pos() {
@@ -1840,6 +1850,13 @@ impl StudioApp {
                     p.automations[ai].points.push((t, y_val(pp.y)));
                     p.automations[ai].sort();
                     self.auto_drag = p.automations[ai].points.iter().position(|q| q.0 == t).map(|k| (ai, k));
+                }
+            }
+            if let (Some((da, t0, v0)), Some(pp)) = (self.auto_draw, lr.interact_pointer_pos()) {
+                if da == ai && lr.dragged() {
+                    let (t, v) = (snap(pp.x), y_val(pp.y));
+                    p.automations[ai].draw(t0, v0, t, v, TICKS_PER_STEP);
+                    self.auto_draw = Some((ai, t, v));
                 }
             }
             if let (Some((da, dk)), Some(pp)) = (self.auto_drag, lr.interact_pointer_pos()) {
@@ -1853,6 +1870,7 @@ impl StudioApp {
             }
             if lr.drag_stopped() {
                 self.auto_drag = None;
+                self.auto_draw = None;
             }
             if lr.clicked() && near.is_none() {
                 if let Some(pp) = lr.interact_pointer_pos() {
@@ -1871,7 +1889,7 @@ impl StudioApp {
                         let v = p.automations[ai].points[k].1;
                         format!("{}: {v:.2} - drag to move, right-click to delete", target.label(p))
                     }
-                    None => format!("{}: click to add a point (plays in song mode)", target.label(p)),
+                    None => format!("{}: click to add a point, Shift+drag to draw", target.label(p)),
                 };
             }
             // Header pinned on the left like the track names.
@@ -1893,6 +1911,7 @@ impl StudioApp {
         if let Some(ai) = remove_auto {
             p.automations.remove(ai);
             self.auto_drag = None;
+            self.auto_draw = None;
         }
 
         // Track headers stay pinned on the left while scrolling.
@@ -1950,8 +1969,9 @@ impl StudioApp {
             self.hint = "Playlist: click to place the selected pattern, right-click to delete".into();
         }
 
-        if p.mode == Mode::Song {
-            let x = grid.left() + p.position as f32 / TICKS_PER_BAR as f32 * bar_w;
+        // In pattern mode the play head shows where the pattern sits in the song.
+        if let Some(tick) = p.automation_tick() {
+            let x = grid.left() + tick as f32 / TICKS_PER_BAR as f32 * bar_w;
             painter.line_segment([pos2(x, rect.top()), pos2(x, rect.bottom())], Stroke::new(1.5_f32, ACCENT));
             let tri = vec![pos2(x - 5.0, rect.top()), pos2(x + 5.0, rect.top()), pos2(x, rect.top() + 7.0)];
             painter.add(egui::Shape::convex_polygon(tri, ACCENT, Stroke::NONE));
