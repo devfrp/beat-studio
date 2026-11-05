@@ -11,11 +11,6 @@ type XWindow = c_ulong;
 /// `XEvent` is a union of 24 longs.
 type XEvent = [c_long; 24];
 
-extern "C" {
-    fn dlopen(filename: *const c_char, flag: c_int) -> *mut c_void;
-    fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
-}
-
 struct Lib {
     open_display: unsafe extern "C" fn(*const c_char) -> *mut Display,
     close_display: unsafe extern "C" fn(*mut Display) -> c_int,
@@ -75,13 +70,10 @@ unsafe fn fn_ptr<T: Copy>(f: *mut c_void) -> T {
 fn lib() -> Option<&'static Lib> {
     static LIB: OnceLock<Option<Lib>> = OnceLock::new();
     LIB.get_or_init(|| unsafe {
-        let h = dlopen(c"libX11.so.6".as_ptr(), 2);
-        if h.is_null() {
-            return None;
-        }
+        let h = crate::dynlib::Lib::open_any(&["libX11.so.6", "libX11.so"])?;
         macro_rules! sym {
             ($name:literal) => {{
-                let f = dlsym(h, $name.as_ptr());
+                let f = h.sym($name);
                 if f.is_null() {
                     return None;
                 }
@@ -233,7 +225,7 @@ impl Drop for Window {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
 

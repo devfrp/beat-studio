@@ -1,48 +1,56 @@
 # Beat Studio
 
-Un petit studio de musique pour Linux, inspiré de FL Studio : on compose des rythmes pas à pas, on écrit des mélodies, on assemble le tout en morceau, on mixe avec des effets et des plugins CLAP, et on exporte en WAV, MP3 ou MIDI.
+A small music studio inspired by FL Studio. Build beats step by step, write melodies, arrange them into a song, mix with effects and CLAP plugins, and export to WAV, MP3 or MIDI.
 
-Écrit en Rust avec [egui](https://github.com/emilk/egui) pour l'interface et [cpal](https://github.com/RustAudio/cpal) pour le son.
+Written in Rust, with [egui](https://github.com/emilk/egui) for the interface and [cpal](https://github.com/RustAudio/cpal) for sound. Runs on Linux, Windows and macOS.
 
-> Beat Studio est un projet indépendant. Il n'est ni affilié à Image-Line ni approuvé par cette société. « FL Studio » est une marque d'Image-Line. Aucun code, son ou image de FL Studio n'est inclus : les sons sont synthétisés par l'application, et seules quelques valeurs de réglage (tempo de départ, résolution des notes, échelle des volumes) reprennent celles de l'original, comme l'explique [MECHANICS.md](MECHANICS.md).
+> Beat Studio is an independent project. It is not affiliated with or endorsed by Image-Line. "FL Studio" is a trademark of Image-Line. No code, sound or artwork from FL Studio is included. The built-in sounds are synthesized by the app, and only a few settings (default tempo, note resolution, volume scale) match the original, as [MECHANICS.md](MECHANICS.md) explains.
 
-**Version 0.1.0** : première version. Tout est testé automatiquement, mais le programme a encore été peu essayé à la main. Les retours sont les bienvenus.
+**Version 0.1.0**: the first release. The automated tests pass, but the app has seen little hands-on use so far. Feedback and bug reports are welcome.
 
-## Ce qu'on peut faire
+## Install
 
-- **Channel rack** : une grille de 16 pas par mesure et par instrument (808 Kick, Clap, HiHat, Snare et un synthé au départ). Le clic droit sur un instrument permet aussi de remplir un pas sur 2, 4 ou 8, de décaler les pas ou d'en tirer au hasard.
-- **Piano roll** : écrire des notes avec leur vélocité, les choisir, les copier, les coller, les dupliquer. Le menu Tools permet de :
-  - quantifier, mettre en legato, découper, inverser, étirer ;
-  - transposer d'une octave, caler sur une gamme, faire des accords, des arpèges ou un riff au hasard ;
-  - varier les vélocités.
+### Linux (x86_64)
 
-  Les notes des autres instruments s'affichent en pâle, et l'accord des notes choisies est nommé.
-- **Playlist** : assembler les motifs en morceau, copier un bloc avec Ctrl+glisser, insérer ou supprimer des mesures. Des courbes d'automation (tempo, volumes, réglages des effets) se placent point par point ou se dessinent à main levée.
-- **Mixer** : un Master et 125 pistes, avec coupure, solo, envois entre pistes et dix emplacements d'effets par piste. Huit effets sont intégrés : Reverb, Delay, EQ, Compressor, Filter, Distortion, Chorus et Phaser.
-- **Plugins CLAP** : instruments et effets, avec leur propre fenêtre ou des curseurs génériques.
-- **Jeu en direct** : clavier d'ordinateur en piano, clavier MIDI, métronome, tempo au tap, enregistrement des notes et du micro.
-- **Fichiers** :
-  - projets `.bsp`, sauvegarde automatique, modèles ;
-  - export en WAV, en MP3, en MIDI, ou un WAV par piste du Mixer ;
-  - import de fichiers MIDI et de sons (WAV, MP3, FLAC, OGG) ;
-  - glisser-déposer sur la fenêtre.
-- **Annuler / rétablir** partout.
+```sh
+curl -fsSL https://raw.githubusercontent.com/devfrp/beat-studio/main/install.sh | sh
+```
 
-## Installation
+This puts the AppImage in `~/.local/bin/beatstudio` and adds Beat Studio to your applications menu. Run the same command again to update. To remove it, add `-s -- --uninstall` after `sh`.
 
-### Ce qu'il faut sur la machine
+You can also download `BeatStudio-x86_64.AppImage` from the [latest release](https://github.com/devfrp/beat-studio/releases/latest), make it executable and run it. AppImages need FUSE 2 (`libfuse2` on Debian/Ubuntu, `fuse2` on Arch). Without it, start the AppImage with `APPIMAGE_EXTRACT_AND_RUN=1`.
 
-| Pour | Paquet (Arch) | Paquet (Debian / Ubuntu) |
+### Windows (x86_64)
+
+Download `BeatStudio-windows-x86_64.exe` from the [latest release](https://github.com/devfrp/beat-studio/releases/latest) and run it. The program is not signed, so SmartScreen will warn you. Click "More info", then "Run anyway".
+
+### macOS 11 or later (Apple Silicon and Intel)
+
+Download `BeatStudio-macos-universal.zip` from the [latest release](https://github.com/devfrp/beat-studio/releases/latest), unzip it and move "Beat Studio" to Applications. The app is not signed, so the first time, right-click it and choose "Open". If macOS says the app is damaged, run:
+
+```sh
+xattr -dr com.apple.quarantine "/Applications/Beat Studio.app"
+```
+
+### Optional extras
+
+- **MP3 export** needs the LAME library: `lame` on Arch, `libmp3lame0` on Debian/Ubuntu, `brew install lame` on macOS, `libmp3lame.dll` next to the program on Windows.
+- **CLAP plugins** are found in these folders:
+  - Linux: `~/.clap` and `/usr/lib/clap`;
+  - macOS: `~/Library/Audio/Plug-Ins/CLAP` and `/Library/Audio/Plug-Ins/CLAP`;
+  - Windows: `%COMMONPROGRAMFILES%\CLAP`;
+  - plus any folder listed in `CLAP_PATH`.
+
+## Build from source
+
+| You need | Arch | Debian / Ubuntu |
 |---|---|---|
-| Compiler | `rust` (1.87 ou plus récent), `pkgconf` | `cargo` (Rust 1.87 ou plus récent, par exemple via rustup), `pkg-config` |
-| Le son et le MIDI | `alsa-lib` (marche aussi avec PipeWire ou PulseAudio par leur couche ALSA) | `libasound2-dev` |
-| La fenêtre | `libxkbcommon`, `wayland`, `libgl` (Wayland ou X11) | `libxkbcommon-dev`, `libwayland-dev`, `libgl1-mesa-dev` |
-| La fenêtre propre des plugins | `libx11` (X11, ou XWayland sous Wayland) | `libx11-6` |
-| L'export MP3 (facultatif) | `lame` | `libmp3lame0` |
+| Rust 1.87 or later | `rust` (or rustup) | rustup |
+| Sound and MIDI | `alsa-lib` | `libasound2-dev`, `pkg-config` |
+| The window (Wayland or X11, OpenGL) | `libxkbcommon`, `wayland`, `libgl` | `libxkbcommon-dev`, `libwayland-dev`, `libgl1-mesa-dev` |
+| Plugin windows | `libx11` (X11, or XWayland on Wayland) | `libx11-6` |
 
-Les plugins CLAP sont cherchés dans `~/.clap` et `/usr/lib/clap`.
-
-### Compiler et lancer
+On Windows and macOS, Rust alone is enough.
 
 ```sh
 git clone https://github.com/devfrp/beat-studio.git
@@ -50,67 +58,93 @@ cd beat-studio
 cargo run --release
 ```
 
-Le binaire se trouve ensuite dans `target/release/beatstudio`. Les [releases](https://github.com/devfrp/beat-studio/releases) proposent aussi un binaire Linux x86_64 déjà compilé.
+The first time it starts, Beat Studio looks for installed CLAP plugins. Each plugin is opened in a separate process, so a plugin that crashes cannot take the studio down. The list is kept in the settings folder:
+- Linux: `~/.config/beatstudio`;
+- macOS: `~/Library/Application Support/beatstudio`;
+- Windows: `%APPDATA%\beatstudio`.
 
-Au premier lancement, Beat Studio cherche les plugins CLAP installés. Chaque plugin est ouvert dans un processus à part, pour qu'un plugin qui plante ne fasse pas tomber le studio. La liste est gardée dans `~/.config/beatstudio/plugins.txt`.
+## What you can do
 
-## Les fenêtres
+- **Channel rack**: a 16-step grid per instrument. You start with an 808 kick, clap, hi-hat and snare, plus a synth. Right-click an instrument to fill every 2, 4 or 8 steps, shift the steps, or get random ones.
+- **Piano roll**: write notes with their velocity; select, copy, paste and duplicate them. The Tools menu can:
+  - quantize, make legato, chop, reverse or stretch;
+  - shift by an octave, snap to a scale, build chords, arpeggiate or generate a random riff;
+  - vary velocities, crescendo and decrescendo.
 
-| Fenêtre | Touche | À quoi elle sert |
+  Other instruments' notes show as faint "ghost" notes, and the chord the selected notes form is named.
+- **Playlist**: arrange patterns into a song, copy clips with Ctrl+drag, insert or delete bars. Automation curves (tempo, volumes, effect settings) can be set point by point or drawn freehand.
+- **Mixer**: a master track and 125 tracks, with mute, solo, sends between tracks and ten effect slots per track. Eight effects are built in: Reverb, Delay, EQ, Compressor, Filter, Distortion, Chorus and Phaser.
+- **CLAP plugins**, both instruments and effects, with their own window:
+  - on Linux, embedded in an X11 window;
+  - on Windows and macOS, the plugin's own floating window, when it offers one.
+
+  Every plugin also gets generic sliders.
+- **Live playing**: computer keyboard as a piano, MIDI keyboard, metronome, tap tempo, recording of notes and of the microphone.
+- **Files**:
+  - `.bsp` projects, autosave and templates;
+  - export to WAV, MP3, MIDI, or one WAV per mixer track;
+  - import of MIDI files and sounds (WAV, MP3, FLAC, OGG);
+  - drag and drop onto the window.
+- **Undo and redo** everywhere.
+
+## Windows
+
+| Window | Key | What it is for |
 |---|---|---|
-| Playlist | F5 | Assembler les motifs en morceau ; courbes d'automation en haut |
-| Channel rack | F6 | Grille de pas : un rang par instrument |
-| Piano roll | F7 | Écrire des notes pour l'instrument choisi |
-| Browser | F8 | Motifs, sons, plugins, projets, modèles, démos, enregistrements, exports |
-| Mixer | F9 | Volume, panoramique, solo, envois et effets de chaque piste |
+| Playlist | F5 | Arrange patterns into a song; automation lanes at the top |
+| Channel rack | F6 | Step grid, one row per instrument |
+| Piano roll | F7 | Notes for the selected instrument |
+| Browser | F8 | Patterns, sounds, plugins, projects, templates, demos, recordings, exports |
+| Mixer | F9 | Volume, pan, solo, sends and effects of each track |
 
-## Raccourcis
+## Shortcuts
 
-| Touche | Action |
+| Key | Action |
 |---|---|
-| Espace | Lecture / pause |
-| L | Mode motif (PAT) ou morceau (SONG) |
-| + ou = / - | Motif suivant (le crée s'il n'existe pas) / précédent |
-| Ctrl+Z, Ctrl+Y (ou Ctrl+Maj+Z) | Annuler, rétablir |
-| Ctrl+S, Ctrl+Maj+S, Ctrl+O | Enregistrer, enregistrer sous, ouvrir |
-| Ctrl+R | Exporter en WAV |
-| Ctrl+M | Métronome |
-| Ctrl+A / C / X / V / B, Suppr, flèches | Piano roll (après un clic dedans) : tout choisir, copier, couper, coller, dupliquer, supprimer, déplacer (Maj+↑↓ : une octave) |
-| Lettres et chiffres | Jouer des notes sur l'instrument choisi |
+| Space | Play / pause |
+| L | Switch between pattern (PAT) and song (SONG) mode |
+| + or = / - | Next pattern (created if needed) / previous pattern |
+| Ctrl+Z, Ctrl+Y (or Ctrl+Shift+Z) | Undo, redo |
+| Ctrl+S, Ctrl+Shift+S, Ctrl+O | Save, save as, open |
+| Ctrl+R | Export to WAV |
+| Ctrl+M | Metronome |
+| Ctrl+A / C / X / V / B, Delete, arrows | Piano roll (after clicking in it): select all, copy, cut, paste, duplicate, delete, move (Shift+Up/Down: one octave) |
+| Letters and digits | Play notes on the selected instrument |
 
-À la souris :
-- **clic droit** : menus d'un instrument, d'un effet ou de la règle des mesures ; supprimer une note, un bloc ou un point ;
-- **Ctrl+glisser** : choisir des notes dans le Piano roll, ou copier un bloc dans la Playlist ;
-- **Maj+glisser** : dessiner une courbe d'automation ;
-- **double-clic** sur un bouton rond : le remettre à sa valeur de départ.
+With the mouse:
+- **right-click**: menus for an instrument, an effect or the bar ruler; delete a note, a clip or a point;
+- **Ctrl+drag**: select notes in the piano roll, or copy a clip in the playlist;
+- **Shift+drag**: draw an automation curve;
+- **double-click** a knob: reset it.
 
-## Fichiers
+## Files
 
-Les projets vont dans `~/Documents/Beat Studio`, avec des sous-dossiers :
-- `Templates` pour les modèles ;
-- `Samples` pour les sons ;
-- `Recorded` pour les prises au micro ;
-- `Rendered` pour les exports WAV et MP3 ;
-- `Scores` pour les fichiers MIDI.
+Projects go in `~/Documents/Beat Studio`, with these subfolders:
+- `Templates` for templates;
+- `Samples` for sounds;
+- `Recorded` for microphone takes;
+- `Rendered` for WAV and MP3 exports;
+- `Scores` for MIDI files.
 
-## Limites connues
+## Known limits
 
-- Les sons intégrés sont synthétisés, et les effets sont ceux de l'application.
-- Plugins CLAP seulement (pas de VST). Leur fenêtre passe par X11 (XWayland sous Wayland).
-- L'automation est sur des couloirs en haut de la Playlist, pas sur les pistes.
-- Un son du disque joue en entier pour une note d'un pas, et il est coupé à la fin d'une note plus longue.
+- The built-in sounds are synthesized, and the effects are the app's own.
+- CLAP plugins only, no VST. On Windows and macOS, a plugin without a floating window can only be set with sliders.
+- Automation lives in lanes at the top of the playlist, not on the tracks.
+- A sound file plays in full for a one-step note, and is cut at the end of a longer note.
+- The Windows and macOS builds come straight from CI and have not been tried by hand yet.
 
-## Développement
+## Development
 
 ```sh
-cargo test                          # les tests
-cargo test -- --include-ignored     # avec les vrais plugins CLAP installés
-cargo clippy                        # doit rester sans avertissement
-cargo run -- --screenshot shots/now.png   # ouvre, capture l'écran et ferme
+cargo test                                # tests
+cargo test -- --include-ignored           # also with the CLAP plugins installed here
+cargo clippy                              # must stay free of warnings
+cargo run -- --screenshot shots/now.png   # open, take a screenshot, close
 ```
 
-[ETAT.md](ETAT.md) dit ce qui est fait et ce qui reste à vérifier.
+[ETAT.md](ETAT.md) (in French) lists what is done and what is left to check. Releases are built by GitHub Actions ([release.yml](.github/workflows/release.yml)) when a `v*` tag is pushed.
 
-## Licence
+## License
 
 [MIT](LICENSE).

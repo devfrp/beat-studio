@@ -21,7 +21,7 @@ const EXPORT_TAIL_SECS: f32 = 2.0;
 
 /// Where projects and exports go: ~/Documents/Beat Studio (or ~/Beat Studio).
 pub fn projects_dir() -> PathBuf {
-    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
+    let home = crate::settings::home_dir();
     let docs = home.join("Documents");
     if docs.is_dir() { docs.join("Beat Studio") } else { home.join("Beat Studio") }
 }

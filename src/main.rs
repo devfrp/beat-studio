@@ -1,5 +1,9 @@
+// No console window behind the studio on Windows (release builds).
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 mod arrange;
 mod audiofile;
+mod dynlib;
 mod editors;
 mod effects;
 mod engine;
@@ -17,6 +21,17 @@ mod widgets;
 mod x11;
 
 use std::path::PathBuf;
+
+/// The window icon, from packaging/beatstudio.png (8-bit RGBA).
+fn icon() -> eframe::egui::IconData {
+    let decoder = png::Decoder::new(&include_bytes!("../packaging/beatstudio.png")[..]);
+    let read = decoder.read_info().ok().and_then(|mut r| {
+        let mut buf = vec![0; r.output_buffer_size()];
+        let info = r.next_frame(&mut buf).ok()?;
+        (info.color_type == png::ColorType::Rgba).then(|| eframe::egui::IconData { rgba: buf[..info.buffer_size()].to_vec(), width: info.width, height: info.height })
+    });
+    read.unwrap_or_default()
+}
 
 fn main() -> eframe::Result<()> {
     let mut screenshot: Option<PathBuf> = None;
@@ -43,7 +58,9 @@ fn main() -> eframe::Result<()> {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("Beat Studio")
             .with_inner_size([1280.0, 800.0])
-            .with_min_inner_size([900.0, 560.0]),
+            .with_min_inner_size([900.0, 560.0])
+            .with_app_id("beatstudio")
+            .with_icon(icon()),
         ..Default::default()
     };
     eframe::run_native(

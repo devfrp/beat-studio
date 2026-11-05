@@ -253,7 +253,8 @@ struct ClapPluginState {
 #[repr(C)]
 struct ClapWindow {
     api: *const c_char,
-    x11: std::ffi::c_ulong,
+    /// X11 window id (the union's other members are pointer-sized too).
+    x11: usize,
 }
 
 #[repr(C)]
@@ -281,6 +282,7 @@ struct ClapPluginTimerSupport {
     on_timer: unsafe extern "C" fn(*const ClapPlugin, u32),
 }
 
+#[cfg(unix)]
 #[repr(C)]
 struct ClapPluginPosixFdSupport {
     on_fd: unsafe extern "C" fn(*const ClapPlugin, i32, u32),
@@ -308,27 +310,48 @@ struct ClapHostPosixFdSupport {
     unregister_fd: unsafe extern "C" fn(*const ClapHost, i32) -> bool,
 }
 
+#[cfg(unix)]
 const FD_READ: u32 = 1 << 0;
+#[cfg(unix)]
 const FD_WRITE: u32 = 1 << 1;
+#[cfg(unix)]
 const FD_ERROR: u32 = 1 << 2;
 
+#[cfg(unix)]
 #[repr(C)]
 struct PollFd {
     fd: i32,
     events: i16,
     revents: i16,
 }
+#[cfg(unix)]
 const POLLIN: i16 = 0x1;
+#[cfg(unix)]
 const POLLOUT: i16 = 0x4;
+#[cfg(unix)]
 const POLLERR: i16 = 0x8;
 
+#[cfg(target_os = "macos")]
+type Nfds = std::ffi::c_uint;
+#[cfg(all(unix, not(target_os = "macos")))]
+type Nfds = std::ffi::c_ulong;
+
+#[cfg(unix)]
 extern "C" {
-    fn poll(fds: *mut PollFd, nfds: std::ffi::c_ulong, timeout: i32) -> i32;
-    fn dlopen(filename: *const c_char, flag: i32) -> *mut c_void;
-    fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
-    fn dlerror() -> *const c_char;
+    fn poll(fds: *mut PollFd, nfds: Nfds, timeout: i32) -> i32;
 }
-const RTLD_NOW: i32 = 2;
+
+/// The window system API a plugin window uses here.
+const GUI_API: &CStr = if cfg!(windows) {
+    c"win32"
+} else if cfg!(target_os = "macos") {
+    c"cocoa"
+} else {
+    c"x11"
+};
+/// Plugins go inside a window of ours only on Linux (X11); elsewhere they
+/// open their own floating window.
+const CAN_EMBED: bool = cfg!(target_os = "linux");
 
 fn cstr(p: *const c_char) -> String {
     if p.is_null() {
@@ -353,15 +376,24 @@ fn libraries() -> &'static Mutex<HashMap<PathBuf, Library>> {
     LIBS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// The file to load: a macOS plugin is a bundle folder with its binary inside.
+fn library_file(path: &Path) -> PathBuf {
+    if path.is_dir() {
+        let stem = path.file_stem().unwrap_or_default();
+        let inner = path.join("Contents").join("MacOS").join(stem);
+        if inner.is_file() {
+            return inner;
+        }
+    }
+    path.to_path_buf()
+}
+
 fn with_factory<T>(path: &Path, f: impl FnOnce(*const ClapPluginFactory) -> T) -> Result<T, String> {
     let mut libs = libraries().lock().map_err(|_| "plugin list is broken")?;
     if !libs.contains_key(path) {
         let c_path = CString::new(path.as_os_str().as_encoded_bytes()).map_err(|_| "bad file name")?;
-        let handle = unsafe { dlopen(c_path.as_ptr(), RTLD_NOW) };
-        if handle.is_null() {
-            return Err(format!("cannot load: {}", cstr(unsafe { dlerror() })));
-        }
-        let entry = unsafe { dlsym(handle, c"clap_entry".as_ptr()) } as *const ClapEntry;
+        let handle = crate::dynlib::Lib::open(&library_file(path))?;
+        let entry = handle.sym(c"clap_entry") as *const ClapEntry;
         if entry.is_null() {
             return Err("not a CLAP plugin".into());
         }
@@ -397,11 +429,22 @@ pub fn search_dirs() -> Vec<PathBuf> {
     if let Some(extra) = std::env::var_os("CLAP_PATH") {
         dirs.extend(std::env::split_paths(&extra));
     }
-    if let Some(home) = std::env::var_os("HOME") {
-        dirs.push(PathBuf::from(home).join(".clap"));
+    let home = crate::settings::home_dir();
+    if cfg!(windows) {
+        if let Some(common) = std::env::var_os("COMMONPROGRAMFILES") {
+            dirs.push(PathBuf::from(common).join("CLAP"));
+        }
+        if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+            dirs.push(PathBuf::from(local).join("Programs").join("Common").join("CLAP"));
+        }
+    } else if cfg!(target_os = "macos") {
+        dirs.push(home.join("Library/Audio/Plug-Ins/CLAP"));
+        dirs.push(PathBuf::from("/Library/Audio/Plug-Ins/CLAP"));
+    } else {
+        dirs.push(home.join(".clap"));
+        dirs.push(PathBuf::from("/usr/lib/clap"));
+        dirs.push(PathBuf::from("/usr/local/lib/clap"));
     }
-    dirs.push(PathBuf::from("/usr/lib/clap"));
-    dirs.push(PathBuf::from("/usr/local/lib/clap"));
     dirs
 }
 
@@ -410,7 +453,8 @@ pub fn plugin_files() -> Vec<PathBuf> {
         let Ok(rd) = std::fs::read_dir(dir) else { return };
         for e in rd.flatten() {
             let p = e.path();
-            if p.extension().is_some_and(|x| x == "clap") && p.is_file() {
+            // A file, or on macOS a bundle folder.
+            if p.extension().is_some_and(|x| x == "clap") && (p.is_file() || library_file(&p) != p) {
                 out.push(p);
             } else if p.is_dir() && depth < 3 {
                 walk(&p, depth + 1, out);
@@ -770,8 +814,8 @@ impl Instance {
     /// True when the plugin can show its own X11 window (embedded or floating).
     fn has_gui(&self) -> bool {
         let Some(g) = self.gui_ext() else { return false };
-        let api = c"x11".as_ptr();
-        unsafe { (g.is_api_supported)(self.plugin, api, false) || (g.is_api_supported)(self.plugin, api, true) }
+        let api = GUI_API.as_ptr();
+        unsafe { (CAN_EMBED && (g.is_api_supported)(self.plugin, api, false)) || (g.is_api_supported)(self.plugin, api, true) }
     }
 
     /// Opens the plugin's own window: inside a window of ours when the plugin
@@ -782,10 +826,10 @@ impl Instance {
         }
         let g = self.gui_ext().ok_or("this plugin has no window of its own")?;
         let p = self.plugin;
-        let api = c"x11".as_ptr();
-        let embedded = unsafe { (g.is_api_supported)(p, api, false) };
+        let api = GUI_API.as_ptr();
+        let embedded = CAN_EMBED && unsafe { (g.is_api_supported)(p, api, false) };
         if !embedded && !unsafe { (g.is_api_supported)(p, api, true) } {
-            return Err("this plugin has no X11 window".into());
+            return Err(format!("this plugin has no {} window it can open here", GUI_API.to_string_lossy()));
         }
         if !unsafe { (g.create)(p, api, !embedded) } {
             return Err("the plugin could not make its window".into());
@@ -802,7 +846,7 @@ impl Instance {
                     return Err(e);
                 }
             };
-            let cw = ClapWindow { api, x11: win.id() };
+            let cw = ClapWindow { api, x11: win.id() as usize };
             if !unsafe { (g.set_parent)(p, &cw) } {
                 unsafe { (g.destroy)(p) };
                 return Err("the plugin refused our window".into());
@@ -892,6 +936,10 @@ impl Instance {
         }
     }
 
+    #[cfg(not(unix))]
+    fn watch_fds(&mut self) {}
+
+    #[cfg(unix)]
     fn watch_fds(&mut self) {
         let fds = match self.flags.fds.lock() {
             Ok(l) if !l.is_empty() => l.clone(),
@@ -913,7 +961,7 @@ impl Instance {
                 PollFd { fd, events, revents: 0 }
             })
             .collect();
-        if unsafe { poll(list.as_mut_ptr(), list.len() as std::ffi::c_ulong, 0) } <= 0 {
+        if unsafe { poll(list.as_mut_ptr(), list.len() as Nfds, 0) } <= 0 {
             return;
         }
         let Some(fs) = self.ext::<ClapPluginPosixFdSupport>(c"clap.posix-fd-support") else { return };

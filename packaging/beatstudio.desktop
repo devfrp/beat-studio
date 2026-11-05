@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Beat Studio
+Comment=Compose beats, melodies and songs
+Exec=beatstudio
+Icon=beatstudio
+Terminal=false
+Categories=AudioVideo;Audio;Midi;Sequencer;
+StartupWMClass=beatstudio

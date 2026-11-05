@@ -48,11 +48,21 @@ fn path() -> PathBuf {
     config_dir().join("settings.txt")
 }
 
+/// The user's home folder (HOME, or USERPROFILE on Windows).
+pub fn home_dir() -> PathBuf {
+    std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."))
+}
+
+/// Settings and the plugin list: ~/.config/beatstudio, the Application
+/// Support folder on macOS, %APPDATA% on Windows.
 pub fn config_dir() -> PathBuf {
-    let base = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
-        .unwrap_or_else(|| PathBuf::from("."));
+    let base = if cfg!(windows) {
+        std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or_else(home_dir)
+    } else if cfg!(target_os = "macos") {
+        home_dir().join("Library/Application Support")
+    } else {
+        std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).unwrap_or_else(|| home_dir().join(".config"))
+    };
     base.join("beatstudio")
 }
 

@@ -1625,7 +1625,7 @@ impl StudioApp {
                 if self.plugin_scan.is_some() {
                     dim(ui, "looking for plugins...");
                 } else if self.plugins.is_empty() {
-                    dim(ui, "no CLAP plugins found (~/.clap, /usr/lib/clap)");
+                    dim(ui, "no CLAP plugins found");
                 }
                 if self.plugins.len() > 12 {
                     ui.add(egui::TextEdit::singleline(&mut self.plugin_search).hint_text("search plugins").desired_width(150.0));

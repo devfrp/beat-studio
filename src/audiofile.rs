@@ -68,9 +68,11 @@ pub fn decode(path: &Path) -> Result<SampleData, String> {
 
 // ---------------------------------------------------------------- MP3 export
 
-extern "C" {
-    fn dlopen(filename: *const std::ffi::c_char, flag: c_int) -> *mut c_void;
-    fn dlsym(handle: *mut c_void, symbol: *const std::ffi::c_char) -> *mut c_void;
+/// Where LAME may be: Linux, macOS (Homebrew), Windows.
+const LAME_NAMES: [&str; 5] = ["libmp3lame.so.0", "libmp3lame.dylib", "/opt/homebrew/lib/libmp3lame.dylib", "/usr/local/lib/libmp3lame.dylib", "libmp3lame.dll"];
+
+fn lame() -> Option<crate::dynlib::Lib> {
+    crate::dynlib::Lib::open_any(&LAME_NAMES)
 }
 
 type LameInit = unsafe extern "C" fn() -> *mut c_void;
@@ -84,18 +86,17 @@ pub const MP3_KBPS: i32 = 192;
 
 /// True when the LAME library is installed.
 pub fn mp3_available() -> bool {
-    unsafe { !dlopen(c"libmp3lame.so.0".as_ptr(), 2).is_null() }
+    lame().is_some()
 }
 
 /// Encodes interleaved stereo samples to MP3 bytes.
 pub fn mp3_bytes(samples: &[f32], rate: u32) -> Result<Vec<u8>, String> {
     unsafe {
-        let lib = dlopen(c"libmp3lame.so.0".as_ptr(), 2);
-        if lib.is_null() {
+        let Some(lib) = lame() else {
             return Err("MP3 export needs the LAME library (package \"lame\")".into());
-        }
+        };
         let sym = |name: &std::ffi::CStr| {
-            let p = dlsym(lib, name.as_ptr());
+            let p = lib.sym(name);
             if p.is_null() { Err(format!("LAME is missing {}", name.to_string_lossy())) } else { Ok(p) }
         };
         let init: LameInit = std::mem::transmute(sym(c"lame_init")?);

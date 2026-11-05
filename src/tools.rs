@@ -201,7 +201,7 @@ impl StudioApp {
             PickFor::ImportMidi => file::folder(file::SCORES),
             _ => file::folder(file::SAMPLES),
         };
-        let dir = if start.is_dir() { start } else { std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/")) };
+        let dir = if start.is_dir() { start } else { crate::settings::home_dir() };
         self.picker = Some(crate::ui::FilePicker { purpose, dir });
     }
 
@@ -214,7 +214,7 @@ impl StudioApp {
         let mut open = true;
         let mut chosen: Option<PathBuf> = None;
         egui::Window::new(title).open(&mut open).collapsible(false).default_size(vec2(420.0, 420.0)).show(ctx, |ui| {
-            let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/"));
+            let home = crate::settings::home_dir();
             ui.horizontal_wrapped(|ui| {
                 for (label, dir) in [
                     ("Home", home.clone()),
