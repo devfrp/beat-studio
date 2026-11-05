@@ -1278,6 +1278,11 @@ impl StudioApp {
                 p.current_pattern = p.patterns.len() - 1;
                 ui.close_menu();
             }
+            if ui.add_enabled(p.patterns.len() > 1, egui::Button::new("Delete pattern")).on_hover_text("Also removes its clips from the playlist (Ctrl+Z to undo)").clicked() {
+                let cur = p.current_pattern;
+                p.remove_pattern(cur);
+                ui.close_menu();
+            }
             ui.horizontal(|ui| {
                 ui.label("Name");
                 let cur = p.current_pattern;

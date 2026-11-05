@@ -479,6 +479,23 @@ impl Project {
         }
     }
 
+    /// Removes a pattern and its clips in the playlist; the last pattern stays.
+    pub fn remove_pattern(&mut self, pat: usize) {
+        if self.patterns.len() <= 1 || pat >= self.patterns.len() {
+            return;
+        }
+        self.patterns.remove(pat);
+        self.clips.retain(|c| c.pattern != pat);
+        for c in &mut self.clips {
+            if c.pattern > pat {
+                c.pattern -= 1;
+            }
+        }
+        if self.current_pattern > pat || self.current_pattern >= self.patterns.len() {
+            self.current_pattern = self.current_pattern.saturating_sub(1);
+        }
+    }
+
     pub fn remove_channel(&mut self, ch: usize) {
         if self.channels.len() <= 1 {
             return;
@@ -1415,6 +1432,22 @@ mod tests {
         p.render(&mut buf, 2);
         assert!(loudest(&buf) < 1e-4, "insert 1 is automated to silence");
         assert_eq!(Target::parse(&Target::Effect(3, 2, 1).key()), Some(Target::Effect(3, 2, 1)));
+    }
+
+    #[test]
+    fn removing_a_pattern_renumbers_clips() {
+        let mut p = Project::new();
+        p.ensure_pattern(2);
+        p.clips = vec![Clip { track: 0, start_bar: 0, pattern: 0 }, Clip { track: 0, start_bar: 1, pattern: 1 }, Clip { track: 1, start_bar: 0, pattern: 2 }];
+        p.current_pattern = 2;
+        p.remove_pattern(1);
+        assert_eq!(p.patterns.len(), 2);
+        assert_eq!(p.clips.iter().map(|c| c.pattern).collect::<Vec<_>>(), vec![0, 1]);
+        assert_eq!(p.current_pattern, 1);
+        p.remove_pattern(0);
+        p.remove_pattern(0);
+        assert_eq!(p.patterns.len(), 1, "the last pattern stays");
+        assert_eq!(p.current_pattern, 0);
     }
 
     #[test]
