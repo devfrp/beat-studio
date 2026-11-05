@@ -571,3 +571,118 @@ mod tests4 {
         assert_eq!(make_chords(&[n(127, 0)], &[200]), vec![n(127, 0)]);
     }
 }
+
+// ---------------------------------------------------------------- time and clean-up
+
+/// Stretches the notes in time by num / den around the earliest start.
+pub fn stretch(notes: &mut [Note], num: u32, den: u32) {
+    if notes.is_empty() {
+        return;
+    }
+    let first = notes.iter().map(|n| n.start).min().unwrap();
+    for note in notes.iter_mut() {
+        let new_start = first + ((note.start as u64 - first as u64) * num as u64 / den as u64) as u32;
+        let new_len = (note.len as u64 * num as u64 / den as u64).max(1) as u32;
+        note.start = new_start;
+        note.len = new_len;
+    }
+}
+
+/// Keeps the first note of each (key, start).
+pub fn remove_duplicates(notes: &mut Vec<Note>) {
+    let mut seen = std::collections::HashSet::new();
+    let mut kept = Vec::new();
+    for note in notes.iter() {
+        let key_start = (note.key, note.start);
+        if seen.insert(key_start) {
+            kept.push(*note);
+        }
+    }
+    *notes = kept;
+}
+
+/// Shortens notes that run into the next note of the same key (ties: slice order).
+pub fn trim_overlaps(notes: &mut [Note]) {
+    let mut order: Vec<usize> = (0..notes.len()).collect();
+    // Stable: same key and start keep their slice order.
+    order.sort_by_key(|&i| (notes[i].key, notes[i].start));
+    for w in order.windows(2) {
+        let (cur, next) = (w[0], w[1]);
+        if notes[cur].key == notes[next].key && notes[cur].start + notes[cur].len > notes[next].start {
+            notes[cur].len = (notes[next].start - notes[cur].start).max(1);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests5 {
+    use super::*;
+
+    fn n(key: u8, start: u32, len: u32) -> Note {
+        Note { key, start, len, vel: 100 }
+    }
+
+    #[test]
+    fn test_stretch() {
+        let mut notes = vec![
+            n(60, 96, 24),
+            n(62, 144, 48)
+        ];
+        stretch(&mut notes, 2, 1);
+        assert_eq!(notes, vec![
+            n(60, 96, 48),
+            n(62, 192, 96)
+        ]);
+
+        let mut notes2 = vec![
+            n(60, 0, 48),
+            n(60, 48, 1)
+        ];
+        stretch(&mut notes2, 1, 2);
+        assert_eq!(notes2, vec![
+            n(60, 0, 24),
+            n(60, 24, 1)
+        ]);
+    }
+
+    #[test]
+    fn test_remove_duplicates() {
+        let mut notes = vec![
+            n(60, 0, 24),
+            n(62, 0, 24),
+            n(60, 0, 48),
+            n(60, 24, 24)
+        ];
+        remove_duplicates(&mut notes);
+        assert_eq!(notes, vec![
+            n(60, 0, 24),
+            n(62, 0, 24),
+            n(60, 24, 24)
+        ]);
+    }
+
+    #[test]
+    fn test_trim_overlaps() {
+        let mut notes = vec![
+            n(60, 24, 48),
+            n(60, 0, 48),
+            n(62, 0, 96),
+            n(60, 24, 10)
+        ];
+        trim_overlaps(&mut notes);
+        assert_eq!(notes, vec![
+            n(60, 24, 1),
+            n(60, 0, 24),
+            n(62, 0, 96),
+            n(60, 24, 10)
+        ]);
+    }
+
+    #[test]
+    fn test_empty() {
+        let mut empty: Vec<Note> = vec![];
+        stretch(&mut empty, 2, 1);
+        remove_duplicates(&mut empty);
+        trim_overlaps(&mut empty);
+    }
+}

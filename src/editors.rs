@@ -319,6 +319,8 @@ impl StudioApp {
                 }
             }
             NoteTool::FlipKeys => notetools::flip_keys(&mut notes),
+            NoteTool::Stretch(num, den) => notetools::stretch(&mut notes, num, den),
+            NoteTool::TrimOverlaps => notetools::trim_overlaps(&mut notes),
             NoteTool::Scale(root, si) => notetools::snap_to_scale(&mut notes, root, SCALES[si].1),
             NoteTool::Crescendo => notetools::velocity_ramp(&mut notes, 40, 120),
             NoteTool::Decrescendo => notetools::velocity_ramp(&mut notes, 120, 40),
@@ -328,9 +330,14 @@ impl StudioApp {
                 let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.subsec_nanos());
                 notetools::humanize(&mut notes, 12, seed);
             }
-            NoteTool::Chop | NoteTool::Chord(_) => {
+            NoteTool::Chop | NoteTool::Chord(_) | NoteTool::RemoveDuplicates => {
                 let pieces = match tool {
                     NoteTool::Chord(ci) => notetools::make_chords(&notes, CHORDS[ci].1),
+                    NoteTool::RemoveDuplicates => {
+                        let mut kept = notes.clone();
+                        notetools::remove_duplicates(&mut kept);
+                        kept
+                    }
                     _ => notetools::chop(&notes, TICKS_PER_STEP),
                 };
                 let mut rest: Vec<Note> = list.iter().enumerate().filter(|(i, _)| !picked.contains(i)).map(|(_, n)| *n).collect();
@@ -374,6 +381,10 @@ impl StudioApp {
                     (NoteTool::FlipKeys, "Flip keys", "Mirror the melody upside down"),
                     (NoteTool::Arpeggiate, "Arpeggiate", "Spread each chord one step per note"),
                     (NoteTool::Humanize, "Humanize velocity", "Vary the velocities a little"),
+                    (NoteTool::Stretch(2, 1), "Stretch x2", "Twice as slow: starts and lengths doubled"),
+                    (NoteTool::Stretch(1, 2), "Stretch /2", "Twice as fast: starts and lengths halved"),
+                    (NoteTool::RemoveDuplicates, "Remove duplicates", "Delete notes on the same key and start as another"),
+                    (NoteTool::TrimOverlaps, "Trim overlaps", "Shorten notes that run into the next one on their key"),
                 ] {
                     if ui.button(label).on_hover_text(tip).clicked() {
                         self.note_tool(p, pat, ch, tool);
@@ -1133,6 +1144,10 @@ enum NoteTool {
     Chord(usize),
     Crescendo,
     Decrescendo,
+    /// Times multiplied by num / den.
+    Stretch(u32, u32),
+    RemoveDuplicates,
+    TrimOverlaps,
 }
 
 const KEY_NAMES: [&str; 12] = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
