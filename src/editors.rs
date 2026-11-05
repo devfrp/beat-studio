@@ -286,6 +286,20 @@ impl StudioApp {
             NoteTool::Quantize => notetools::quantize(&mut notes, TICKS_PER_STEP),
             NoteTool::Legato => notetools::legato(&mut notes),
             NoteTool::Reverse => notetools::reverse(&mut notes),
+            NoteTool::OctaveUp | NoteTool::OctaveDown => {
+                let by = if matches!(tool, NoteTool::OctaveUp) { 12 } else { -12 };
+                if !notetools::transpose(&mut notes, by) {
+                    self.hint = "Some notes would leave the keyboard".into();
+                    return;
+                }
+            }
+            NoteTool::FlipKeys => notetools::flip_keys(&mut notes),
+            NoteTool::Arpeggiate => notetools::arpeggiate(&mut notes, TICKS_PER_STEP),
+            NoteTool::Humanize => {
+                // A new variation each time.
+                let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.subsec_nanos());
+                notetools::humanize(&mut notes, 12, seed);
+            }
             NoteTool::Chop => {
                 let pieces = notetools::chop(&notes, TICKS_PER_STEP);
                 let mut rest: Vec<Note> = list.iter().enumerate().filter(|(i, _)| !picked.contains(i)).map(|(_, n)| *n).collect();
@@ -324,6 +338,11 @@ impl StudioApp {
                     (NoteTool::Legato, "Legato", "Each note lasts until the next one starts"),
                     (NoteTool::Chop, "Chop", "Cut notes into one-step pieces"),
                     (NoteTool::Reverse, "Reverse", "Play the notes backwards in time"),
+                    (NoteTool::OctaveUp, "Octave up", "Move the notes up 12 semitones"),
+                    (NoteTool::OctaveDown, "Octave down", "Move the notes down 12 semitones"),
+                    (NoteTool::FlipKeys, "Flip keys", "Mirror the melody upside down"),
+                    (NoteTool::Arpeggiate, "Arpeggiate", "Spread each chord one step per note"),
+                    (NoteTool::Humanize, "Humanize velocity", "Vary the velocities a little"),
                 ] {
                     if ui.button(label).on_hover_text(tip).clicked() {
                         self.note_tool(p, pat, ch, tool);
@@ -1045,4 +1064,9 @@ enum NoteTool {
     Legato,
     Chop,
     Reverse,
+    OctaveUp,
+    OctaveDown,
+    FlipKeys,
+    Arpeggiate,
+    Humanize,
 }

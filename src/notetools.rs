@@ -126,3 +126,184 @@ mod tests {
         assert!(chop_result.is_empty());
     }
 }
+
+/// Moves every key by `semitones`; changes nothing and returns false if a note would leave 0..=127.
+pub fn transpose(notes: &mut [Note], semitones: i32) -> bool {
+    if notes.is_empty() {
+        return true;
+    }
+    for note in notes.iter() {
+        let new_key = (note.key as i32) + semitones;
+        if !(0..=127).contains(&new_key) {
+            return false;
+        }
+    }
+    for note in notes.iter_mut() {
+        note.key = ((note.key as i32) + semitones) as u8;
+    }
+    true
+}
+
+/// Mirrors the keys between the lowest and the highest.
+pub fn flip_keys(notes: &mut [Note]) {
+    if notes.is_empty() {
+        return;
+    }
+    let lo = notes.iter().map(|n| n.key).min().unwrap();
+    let hi = notes.iter().map(|n| n.key).max().unwrap();
+    for note in notes.iter_mut() {
+        note.key = lo + hi - note.key;
+    }
+}
+
+/// Spreads each chord (notes with the same start), lowest key first, `step` ticks apart;
+/// lengths shrink by the same amount but not below `step`.
+pub fn arpeggiate(notes: &mut [Note], step: u32) {
+    if notes.is_empty() {
+        return;
+    }
+    let mut groups: Vec<(u32, Vec<usize>)> = Vec::new();
+    for (i, note) in notes.iter().enumerate() {
+        let start_val = note.start;
+        if let Some(g) = groups.iter_mut().find(|(s, _)| *s == start_val) {
+            g.1.push(i);
+        } else {
+            groups.push((start_val, vec![i]));
+        }
+    }
+    for (start_val, indices) in groups {
+        if indices.len() <= 1 {
+            continue;
+        }
+        let mut key_idx: Vec<(u8, usize)> = indices.iter()
+            .map(|&i| (notes[i].key, i))
+            .collect();
+        key_idx.sort_by_key(|&(k, _)| k);
+        for (rank, (_, idx)) in key_idx.into_iter().enumerate() {
+            let orig_len = notes[idx].len;
+            let new_start = start_val + step * rank as u32;
+            let new_len = if orig_len >= step {
+                orig_len.saturating_sub(step * rank as u32).max(step)
+            } else {
+                orig_len
+            };
+            notes[idx].start = new_start;
+            notes[idx].len = new_len;
+        }
+    }
+}
+
+/// Moves each velocity by a pseudo-random amount in [-amount, amount] (xorshift32), kept in 1..=127.
+pub fn humanize(notes: &mut [Note], amount: u8, seed: u32) {
+    if amount == 0 || notes.is_empty() {
+        return;
+    }
+    let mut state = seed | 1;
+    for note in notes.iter_mut() {
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        let mod_val = 2 * amount as u32 + 1;
+        let r = state % mod_val;
+        let offset = (r as i32) - amount as i32;
+        let new_vel = note.vel as i32 + offset;
+        note.vel = new_vel.clamp(1, 127) as u8;
+    }
+}
+
+#[cfg(test)]
+mod tests2 {
+    use super::*;
+
+    fn n(key: u8, start: u32, len: u32) -> Note {
+        Note { key, start, len, vel: 100 }
+    }
+
+    #[test]
+    fn test_transpose() {
+        let mut notes = vec![n(60, 0, 24), n(64, 0, 24)];
+        assert!(transpose(&mut notes, 12));
+        assert_eq!(notes[0].key, 72);
+        assert_eq!(notes[1].key, 76);
+        let mut notes2 = vec![n(60, 0, 24)];
+        assert!(!transpose(&mut notes2, 70));
+        assert_eq!(notes2[0].key, 60);
+    }
+
+    #[test]
+    fn test_flip_keys() {
+        let mut notes = vec![n(60, 0, 24), n(64, 24, 24), n(67, 48, 24)];
+        flip_keys(&mut notes);
+        assert_eq!(notes[0].key, 67);
+        assert_eq!(notes[1].key, 63);
+        assert_eq!(notes[2].key, 60);
+    }
+
+    #[test]
+    fn test_arpeggiate1() {
+        let mut notes = vec![n(67, 0, 96), n(60, 0, 96), n(64, 0, 96), n(72, 96, 48)];
+        arpeggiate(&mut notes, 24);
+        assert_eq!(notes[0].key, 67);
+        assert_eq!(notes[0].start, 48);
+        assert_eq!(notes[0].len, 48);
+        assert_eq!(notes[1].key, 60);
+        assert_eq!(notes[1].start, 0);
+        assert_eq!(notes[1].len, 96);
+        assert_eq!(notes[2].key, 64);
+        assert_eq!(notes[2].start, 24);
+        assert_eq!(notes[2].len, 72);
+        assert_eq!(notes[3].key, 72);
+        assert_eq!(notes[3].start, 96);
+        assert_eq!(notes[3].len, 48);
+    }
+
+    #[test]
+    fn test_arpeggiate2() {
+        let mut notes = vec![n(60, 0, 10), n(64, 0, 10)];
+        arpeggiate(&mut notes, 24);
+        assert_eq!(notes[0].key, 60);
+        assert_eq!(notes[0].start, 0);
+        assert_eq!(notes[0].len, 10);
+        assert_eq!(notes[1].key, 64);
+        assert_eq!(notes[1].start, 24);
+        assert_eq!(notes[1].len, 10);
+    }
+
+    #[test]
+    fn test_humanize() {
+        let mut notes = Vec::new();
+        for _ in 0..50 {
+            notes.push(n(60, 0, 24));
+        }
+        humanize(&mut notes, 10, 7);
+        let vels: Vec<u8> = notes.iter().map(|n| n.vel).collect();
+        for &v in &vels {
+            assert!((90..=110).contains(&v));
+        }
+        let first = vels[0];
+        let all_equal = vels.iter().all(|&x| x == first);
+        assert!(!all_equal);
+        let mut notes2 = vec![n(60, 0, 24)];
+        humanize(&mut notes2, 0, 7);
+        assert_eq!(notes2[0].vel, 100);
+        let mut notes3 = vec![n(60, 0, 24)];
+        humanize(&mut notes3, 127, 7);
+        assert!((1..=127).contains(&notes3[0].vel));
+    }
+
+    #[test]
+    fn arpeggiate_big_chord_of_short_notes() {
+        let mut notes = vec![n(60, 0, 48), n(62, 0, 48), n(64, 0, 48), n(65, 0, 48)];
+        arpeggiate(&mut notes, 24);
+        assert_eq!(notes.iter().map(|n| (n.start, n.len)).collect::<Vec<_>>(), vec![(0, 48), (24, 24), (48, 24), (72, 24)]);
+    }
+
+    #[test]
+    fn test_empty() {
+        let mut notes: Vec<Note> = vec![];
+        transpose(&mut notes, 5);
+        flip_keys(&mut notes);
+        arpeggiate(&mut notes, 10);
+        humanize(&mut notes, 10, 7);
+    }
+}
