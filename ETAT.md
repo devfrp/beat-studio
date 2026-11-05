@@ -7,7 +7,7 @@
 - Exports : WAV, MP3 (bibliothèque LAME du système), MIDI, un WAV par piste du Mixer. Import MIDI.
 - Jeu en direct : métronome, tempo au tap, clavier d'ordinateur en piano, clavier MIDI, enregistrement des notes.
 - Annuler / rétablir (Ctrl+Z / Ctrl+Y).
-- Piano roll : sélection, copier / couper / coller / dupliquer, flèches, couloir de vélocité, menu Tools (Quantize, Legato, Chop, Reverse, octave, Flip keys, Arpeggiate, Humanize, Snap to scale, Chords, Crescendo, Decrescendo, Stretch, Remove duplicates, Trim overlaps).
+- Piano roll : sélection, copier / couper / coller / dupliquer, flèches, couloir de vélocité, menu Tools (Quantize, Legato, Chop, Reverse, octave, Flip keys, Arpeggiate, Humanize, Snap to scale, Chords, Crescendo, Decrescendo, Stretch, Remove duplicates, Trim overlaps, Riff), notes fantômes (case Ghosts).
 - Motifs : supprimer un motif (PATTERNS) ; Playlist : Ctrl+glisser copie un bloc ; clic droit sur la règle : insérer ou supprimer une mesure.
 - Channel rack : sous-menu Steps (remplir un pas sur 1, 2, 4 ou 8, décaler, pas au hasard).
 - Mixer : solo, envois entre pistes, 10 emplacements d'effets, 8 effets intégrés (Reverb, Delay, EQ, Compressor, Filter, Distortion, Chorus, Phaser).
@@ -16,7 +16,7 @@
 - Automation (tempo, volumes, panoramiques, réglages des effets) en mode SONG, et en mode PAT à l'endroit où le motif est posé ; points ou dessin à main levée (Maj+glisser).
 - Enregistrement audio depuis le micro.
 - Browser : tous les dossiers fonctionnent.
-- 64 tests passent, plus 3 avec les vrais plugins et leurs fenêtres (`cargo test -- --include-ignored`), `cargo clippy` sans avertissement.
+- 68 tests passent, plus 3 avec les vrais plugins et leurs fenêtres (`cargo test -- --include-ignored`), `cargo clippy` sans avertissement.
 
 ## Pas encore vérifié à la main
 

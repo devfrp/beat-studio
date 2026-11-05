@@ -686,3 +686,126 @@ mod tests5 {
         trim_overlaps(&mut empty);
     }
 }
+
+// ---------------------------------------------------------------- riff generator
+
+fn next_xorshift(state: &mut u32) -> u32 {
+    let mut s = *state;
+    s ^= s << 13;
+    s ^= s >> 17;
+    s ^= s << 5;
+    *state = s;
+    s
+}
+
+/// A random melody in a scale (xorshift32 from `seed`): about `density` steps in 100 start a
+/// note, moving by small jumps along the scale, one or two steps long, never overlapping.
+#[allow(clippy::too_many_arguments)]
+pub fn riff(root: u8, scale: &[u8], low: u8, high: u8, steps: u32, step_len: u32, density: u32, seed: u32) -> Vec<Note> {
+    let allowed: Vec<u8> = (low..=high.min(127)).filter(|&k| scale.contains(&((k as i32 - root as i32).rem_euclid(12) as u8))).collect();
+
+    if allowed.is_empty() {
+        return Vec::new();
+    }
+
+    let len = allowed.len();
+    let mid = len / 2;
+
+    let mut state: u32 = seed | 1;
+    let mut notes: Vec<Note> = Vec::new();
+    let mut i: u32 = 0;
+    while i < steps {
+        let r = next_xorshift(&mut state) % 100;
+        if r >= density {
+            i += 1;
+            continue;
+        }
+
+        let start = i * step_len;
+
+        let j = (next_xorshift(&mut state) % 5) as i32 - 2;
+        let key_index = match notes.last() {
+            None => mid,
+            Some(prev) => {
+                let prev_idx = allowed.iter().position(|&k| k == prev.key).unwrap_or(mid);
+                (prev_idx as i32 + j).clamp(0, len as i32 - 1) as usize
+            }
+        };
+        let key = allowed[key_index];
+
+        let len_factor = next_xorshift(&mut state) % 2;
+        let mut note_len = step_len * (1 + len_factor);
+        let max_start = steps * step_len;
+        if start + note_len > max_start {
+            note_len = max_start - start;
+        }
+
+        let vel = 80 + (next_xorshift(&mut state) % 41) as u8;
+
+        notes.push(Note { key, start, len: note_len, vel });
+
+        i += note_len / step_len;
+    }
+
+    notes
+}
+
+#[cfg(test)]
+mod tests_riff {
+    use super::*;
+
+    #[test]
+    fn test_density() {
+        let scale = [0u8, 2, 4, 5, 7, 9, 11];
+        let notes = riff(0, &scale, 48, 72, 16, 24, 0, 1);
+        assert!(notes.is_empty());
+
+        let notes = riff(0, &scale, 48, 72, 16, 24, 100, 1);
+        assert!(!notes.is_empty());
+        assert!(notes.len() >= 8);
+    }
+
+    #[test]
+    fn test_c_major() {
+        let scale = [0u8, 2, 4, 5, 7, 9, 11];
+        for seed in 1..=20 {
+            let notes = riff(0, &scale, 48, 72, 16, 24, 60, seed);
+            for note in &notes {
+                assert!(matches!(note.key % 12, 0 | 2 | 4 | 5 | 7 | 9 | 11));
+                assert!((48..=72).contains(&note.key));
+            }
+            for note in &notes {
+                assert_eq!(note.start % 24, 0);
+            }
+            for w in notes.windows(2) {
+                assert!(w[1].start >= w[0].start + w[0].len, "overlap");
+            }
+            let max_time = 16 * 24;
+            for note in &notes {
+                assert!(note.start + note.len <= max_time);
+            }
+            for note in &notes {
+                assert!((80..=120).contains(&note.vel));
+            }
+        }
+    }
+
+    #[test]
+    fn test_determinism() {
+        let scale = [0u8, 2, 4, 5, 7, 9, 11];
+        let notes1: Vec<Note> = riff(0, &scale, 48, 72, 16, 24, 60, 1);
+        let notes2: Vec<Note> = riff(0, &scale, 48, 72, 16, 24, 60, 1);
+        assert_eq!(notes1, notes2);
+
+        let notes1: Vec<Note> = riff(0, &scale, 48, 72, 16, 24, 60, 1);
+        let notes3: Vec<Note> = riff(0, &scale, 48, 72, 16, 24, 60, 2);
+        assert_ne!(notes1, notes3);
+    }
+
+    #[test]
+    fn test_empty_scale() {
+        let scale: [u8; 0] = [];
+        let notes = riff(0, &scale, 48, 72, 16, 24, 60, 1);
+        assert!(notes.is_empty());
+    }
+}

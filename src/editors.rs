@@ -296,6 +296,17 @@ impl StudioApp {
     /// Applies a piano roll tool to the selected notes (all notes when none
     /// is selected). Length markers (velocity 0) are left alone.
     fn note_tool(&mut self, p: &mut Project, pat: usize, ch: usize, tool: NoteTool) {
+        if let NoteTool::Riff(root, si) = tool {
+            // A whole new melody over the pattern, between C4 (60) and C6 (84).
+            let steps = p.patterns[pat].length_ticks() / TICKS_PER_STEP;
+            let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.subsec_nanos());
+            let notes = notetools::riff(root, SCALES[si].1, 60, 84, steps, TICKS_PER_STEP, 60, seed);
+            let list = &mut p.patterns[pat].notes[ch];
+            list.retain(|n| n.vel == 0);
+            list.extend(notes);
+            self.note_sel.clear();
+            return;
+        }
         let list = &mut p.patterns[pat].notes[ch];
         let picked: Vec<usize> = if self.note_sel.is_empty() {
             (0..list.len()).filter(|&i| list[i].vel > 0).collect()
@@ -319,6 +330,8 @@ impl StudioApp {
                 }
             }
             NoteTool::FlipKeys => notetools::flip_keys(&mut notes),
+            // Handled above: it does not work on the picked notes.
+            NoteTool::Riff(..) => return,
             NoteTool::Stretch(num, den) => notetools::stretch(&mut notes, num, den),
             NoteTool::TrimOverlaps => notetools::trim_overlaps(&mut notes),
             NoteTool::Scale(root, si) => notetools::snap_to_scale(&mut notes, root, SCALES[si].1),
@@ -410,6 +423,16 @@ impl StudioApp {
                             item(ui, NoteTool::Chord(ci), chord, "Add the chord's notes above each note");
                         }
                     });
+                });
+                ui.menu_button("Riff", |ui| {
+                    ui.label(egui::RichText::new("Replaces this instrument's notes with a new melody").color(TEXT_DIM).size(10.0));
+                    for (root, name) in KEY_NAMES.iter().enumerate() {
+                        ui.menu_button(*name, |ui| {
+                            for (si, (scale, _)) in SCALES.iter().enumerate() {
+                                item(ui, NoteTool::Riff(root as u8, si), &format!("{name} {scale}"), "A new random melody each time (Ctrl+Z to undo)");
+                            }
+                        });
+                    }
                 });
                 ui.menu_button("Velocity", |ui| {
                     item(ui, NoteTool::Humanize, "Humanize", "Vary the velocities a little");
@@ -1159,6 +1182,8 @@ enum NoteTool {
     Scale(u8, usize),
     /// Index in CHORDS.
     Chord(usize),
+    /// Root, index in SCALES.
+    Riff(u8, usize),
     Crescendo,
     Decrescendo,
     /// Times multiplied by num / den.
