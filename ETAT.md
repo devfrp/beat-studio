@@ -10,13 +10,13 @@
 - Piano roll : sélection, copier / couper / coller / dupliquer, flèches, couloir de vélocité, menu Tools (Quantize, Legato, Chop, Reverse, octave, Flip keys, Arpeggiate, Humanize, Snap to scale, Chords, Crescendo, Decrescendo).
 - Motifs : supprimer un motif (PATTERNS) ; Playlist : Ctrl+glisser copie un bloc.
 - Channel rack : sous-menu Steps (remplir un pas sur 1, 2, 4 ou 8, décaler, pas au hasard).
-- Mixer : solo, envois entre pistes, 10 emplacements d'effets, 6 effets intégrés (Reverb, Delay, EQ, Compressor, Filter, Distortion).
+- Mixer : solo, envois entre pistes, 10 emplacements d'effets, 8 effets intégrés (Reverb, Delay, EQ, Compressor, Filter, Distortion, Chorus, Phaser).
 - Plugins CLAP (instruments et effets) : 239 trouvés sur cette machine, réglages en curseurs, fenêtre propre du plugin (X11), état gardé dans le projet.
 - Sons du disque (WAV, MP3, FLAC, OGG), fichiers déposés sur la fenêtre.
 - Automation (tempo, volumes, panoramiques, réglages des effets) en mode SONG, et en mode PAT à l'endroit où le motif est posé ; points ou dessin à main levée (Maj+glisser).
 - Enregistrement audio depuis le micro.
 - Browser : tous les dossiers fonctionnent.
-- 48 tests passent, plus 3 avec les vrais plugins et leurs fenêtres (`cargo test -- --include-ignored`), `cargo clippy` sans avertissement.
+- 53 tests passent, plus 3 avec les vrais plugins et leurs fenêtres (`cargo test -- --include-ignored`), `cargo clippy` sans avertissement.
 
 ## Pas encore vérifié à la main
 

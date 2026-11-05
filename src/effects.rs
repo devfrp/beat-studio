@@ -4,6 +4,7 @@
 
 use std::f32::consts::PI;
 
+use crate::modfx::{Chorus, Phaser};
 use crate::plugin::{PluginEffect, PluginSlot, Transport};
 
 pub const FX_SLOTS: usize = 10;
@@ -19,13 +20,23 @@ pub enum EffectKind {
     Compressor,
     Filter,
     Distortion,
+    Chorus,
+    Phaser,
     /// A CLAP plugin; its own parameters live in the plugin.
     Plugin,
 }
 
 impl EffectKind {
-    pub const BUILT_IN: [EffectKind; 6] =
-        [EffectKind::Reverb, EffectKind::Delay, EffectKind::Eq, EffectKind::Compressor, EffectKind::Filter, EffectKind::Distortion];
+    pub const BUILT_IN: [EffectKind; 8] = [
+        EffectKind::Reverb,
+        EffectKind::Delay,
+        EffectKind::Eq,
+        EffectKind::Compressor,
+        EffectKind::Filter,
+        EffectKind::Distortion,
+        EffectKind::Chorus,
+        EffectKind::Phaser,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -35,6 +46,8 @@ impl EffectKind {
             EffectKind::Compressor => "Compressor",
             EffectKind::Filter => "Filter",
             EffectKind::Distortion => "Distortion",
+            EffectKind::Chorus => "Chorus",
+            EffectKind::Phaser => "Phaser",
             EffectKind::Plugin => "Plugin",
         }
     }
@@ -47,6 +60,8 @@ impl EffectKind {
             EffectKind::Compressor => "compressor",
             EffectKind::Filter => "filter",
             EffectKind::Distortion => "distortion",
+            EffectKind::Chorus => "chorus",
+            EffectKind::Phaser => "phaser",
             EffectKind::Plugin => "plugin",
         }
     }
@@ -63,6 +78,8 @@ impl EffectKind {
             EffectKind::Compressor => ["Threshold", "Ratio", "Release", "Gain"],
             EffectKind::Filter => ["Cutoff", "Resonance", "Type", "Mix"],
             EffectKind::Distortion => ["Drive", "Tone", "Mix", "Output"],
+            EffectKind::Chorus => ["Rate", "Depth", "Delay", "Mix"],
+            EffectKind::Phaser => ["Rate", "Depth", "Feedback", "Mix"],
             EffectKind::Plugin => ["", "", "", ""],
         }
     }
@@ -75,6 +92,8 @@ impl EffectKind {
             EffectKind::Compressor => [0.7, 0.25, 0.3, 0.0],
             EffectKind::Filter => [0.6, 0.1, 0.0, 1.0],
             EffectKind::Distortion => [0.4, 0.7, 1.0, 0.6],
+            EffectKind::Chorus => [0.3, 0.4, 0.3, 0.5],
+            EffectKind::Phaser => [0.3, 0.7, 0.5, 0.5],
             EffectKind::Plugin => [0.0; PARAMS],
         }
     }
@@ -95,6 +114,10 @@ impl EffectKind {
             (EffectKind::Filter, 2) => ["Low pass", "Band pass", "High pass"][filter_type(v)].into(),
             (EffectKind::Distortion, 0) => db(v * 36.0),
             (EffectKind::Distortion, 3) => db((v - 0.6) * 30.0),
+            (EffectKind::Chorus, 0) => format!("{:.2} Hz", 0.1 * 50f32.powf(v)),
+            (EffectKind::Chorus, 1) => format!("{:.1} ms", v * 8.0),
+            (EffectKind::Chorus, 2) => format!("{:.0} ms", 5.0 + v * 20.0),
+            (EffectKind::Phaser, 0) => format!("{:.2} Hz", 0.05 * 40f32.powf(v)),
             _ => format!("{:.0}%", v * 100.0),
         }
     }
@@ -242,6 +265,8 @@ enum State {
     Compressor { env: f32 },
     Filter(Biquad),
     Distortion { lp: [f32; 2] },
+    Chorus(Box<Chorus>),
+    Phaser(Phaser),
 }
 
 pub struct Effect {
@@ -287,6 +312,8 @@ impl Effect {
             EffectKind::Compressor => State::Compressor { env: 0.0 },
             EffectKind::Filter => State::Filter(Biquad::default()),
             EffectKind::Distortion => State::Distortion { lp: [0.0; 2] },
+            EffectKind::Chorus => State::Chorus(Box::new(Chorus::new(rate))),
+            EffectKind::Phaser => State::Phaser(Phaser::new()),
             EffectKind::Plugin => unreachable!("plugins are processed by their slot"),
         }
     }
@@ -393,6 +420,8 @@ impl Effect {
                     }
                 }
             }
+            State::Chorus(c) => c.process(buf, p, rate),
+            State::Phaser(ph) => ph.process(buf, p, rate),
         }
     }
 }
