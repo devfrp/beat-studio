@@ -22,6 +22,8 @@ struct Lib {
     default_screen: unsafe extern "C" fn(*mut Display) -> c_int,
     root_window: unsafe extern "C" fn(*mut Display, c_int) -> XWindow,
     black_pixel: unsafe extern "C" fn(*mut Display, c_int) -> c_ulong,
+    display_width: unsafe extern "C" fn(*mut Display, c_int) -> c_int,
+    display_height: unsafe extern "C" fn(*mut Display, c_int) -> c_int,
     create_simple_window: unsafe extern "C" fn(*mut Display, XWindow, c_int, c_int, c_uint, c_uint, c_uint, c_ulong, c_ulong) -> XWindow,
     store_name: unsafe extern "C" fn(*mut Display, XWindow, *const c_char) -> c_int,
     intern_atom: unsafe extern "C" fn(*mut Display, *const c_char, c_int) -> c_ulong,
@@ -58,6 +60,7 @@ struct SizeHints {
     base_height: c_int,
     win_gravity: c_int,
 }
+const P_POSITION: c_long = 1 << 2;
 const P_SIZE: c_long = 1 << 3;
 const P_MIN_SIZE: c_long = 1 << 4;
 const P_MAX_SIZE: c_long = 1 << 5;
@@ -91,6 +94,8 @@ fn lib() -> Option<&'static Lib> {
             default_screen: sym!(c"XDefaultScreen"),
             root_window: sym!(c"XRootWindow"),
             black_pixel: sym!(c"XBlackPixel"),
+            display_width: sym!(c"XDisplayWidth"),
+            display_height: sym!(c"XDisplayHeight"),
             create_simple_window: sym!(c"XCreateSimpleWindow"),
             store_name: sym!(c"XStoreName"),
             intern_atom: sym!(c"XInternAtom"),
@@ -142,7 +147,10 @@ impl Window {
             let screen = (x.default_screen)(display);
             let root = (x.root_window)(display, screen);
             let black = (x.black_pixel)(display, screen);
-            let id = (x.create_simple_window)(display, root, 0, 0, w, h, 0, black, black);
+            // Centred on the screen (all monitors together under XWayland).
+            let px = (((x.display_width)(display, screen) - w as c_int) / 2).max(0);
+            let py = (((x.display_height)(display, screen) - h as c_int) / 2).max(0);
+            let id = (x.create_simple_window)(display, root, px, py, w, h, 0, black, black);
             (x.store_name)(display, id, title.as_ptr());
             let mut delete_atom = (x.intern_atom)(display, c"WM_DELETE_WINDOW".as_ptr(), 0);
             (x.set_wm_protocols)(display, id, &mut delete_atom, 1);
@@ -150,7 +158,7 @@ impl Window {
             let kind = (x.intern_atom)(display, c"_NET_WM_WINDOW_TYPE".as_ptr(), 0);
             let dialog = (x.intern_atom)(display, c"_NET_WM_WINDOW_TYPE_DIALOG".as_ptr(), 0);
             (x.change_property)(display, id, kind, XA_ATOM, 32, 0, &dialog, 1);
-            let mut hints = SizeHints { flags: P_SIZE, width: w as c_int, height: h as c_int, ..Default::default() };
+            let mut hints = SizeHints { flags: P_POSITION | P_SIZE, x: px, y: py, width: w as c_int, height: h as c_int, ..Default::default() };
             if !resizable {
                 hints.flags |= P_MIN_SIZE | P_MAX_SIZE;
                 (hints.min_width, hints.min_height) = (w as c_int, h as c_int);

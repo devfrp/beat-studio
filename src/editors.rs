@@ -134,6 +134,10 @@ impl StudioApp {
                         self.plugin_window = Some(PluginTarget::Channel(ch));
                         ui.close_menu();
                     }
+                    if p.channels[ch].plugin.is_some() && ui.button("Plugin window").clicked() {
+                        self.toggle_plugin_gui(p, PluginTarget::Channel(ch));
+                        ui.close_menu();
+                    }
                     ui.separator();
                     if ui.button("Load sound file...").clicked() {
                         self.pick(PickFor::ReplaceSample(ch));
@@ -871,8 +875,15 @@ impl StudioApp {
         };
         if e.plugin.is_some() {
             ui.label(egui::RichText::new(e.name()).color(ACCENT));
-            if ui.button("Parameters...").clicked() {
-                self.plugin_window = Some(PluginTarget::Effect(i, s));
+            let mut toggle = false;
+            ui.horizontal(|ui| {
+                if ui.button("Parameters...").clicked() {
+                    self.plugin_window = Some(PluginTarget::Effect(i, s));
+                }
+                toggle = ui.button("Plugin window").clicked();
+            });
+            if toggle {
+                self.toggle_plugin_gui(p, PluginTarget::Effect(i, s));
             }
             return;
         }
@@ -901,6 +912,10 @@ impl StudioApp {
     fn slot_menu(&mut self, ui: &mut Ui, p: &mut Project, i: usize, s: usize) {
         if p.mixer[i].fx[s].as_ref().is_some_and(|e| e.plugin.is_some()) && ui.button("Parameters...").clicked() {
             self.plugin_window = Some(PluginTarget::Effect(i, s));
+            ui.close_menu();
+        }
+        if p.mixer[i].fx[s].as_ref().is_some_and(|e| e.plugin.is_some()) && ui.button("Plugin window").clicked() {
+            self.toggle_plugin_gui(p, PluginTarget::Effect(i, s));
             ui.close_menu();
         }
         if s > 0 && ui.button("Move up").clicked() {

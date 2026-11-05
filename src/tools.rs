@@ -388,6 +388,26 @@ impl StudioApp {
         p.mixer[insert].fx.iter().position(|e| e.is_none())
     }
 
+    /// Opens the plugin's own window, or closes it when it is open.
+    pub fn toggle_plugin_gui(&mut self, p: &mut Project, target: PluginTarget) {
+        let slot = match target {
+            PluginTarget::Channel(ch) => p.channels.get_mut(ch).and_then(|c| c.plugin.as_mut()).map(|s| (s.live.as_mut().map(|l| &mut l.core), s.info.name.clone())),
+            PluginTarget::Effect(i, sl) => p.mixer[i].fx[sl].as_mut().and_then(|e| e.plugin.as_mut()).map(|s| (s.live.as_mut().map(|l| &mut l.core), s.info.name.clone())),
+        };
+        let Some((core, name)) = slot else { return };
+        let Some(core) = core else {
+            self.hint = format!("{name} is not loaded");
+            return;
+        };
+        if core.gui_open() {
+            core.close_gui();
+        } else if !core.has_gui() {
+            self.hint = format!("{name} has no window of its own - use its parameters");
+        } else if let Err(e) = core.open_gui(&name) {
+            self.hint = format!("{name}: its window could not open - {e}");
+        }
+    }
+
     /// Generic sliders for a plugin's parameters, and the button that opens
     /// the plugin's own window.
     pub fn plugin_params_window(&mut self, ctx: &egui::Context, p: &mut Project) {
