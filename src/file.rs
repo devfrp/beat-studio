@@ -492,7 +492,13 @@ fn copy_for_render(p: &Project, rate: f32) -> Project {
 /// plus a short tail so the last sounds can ring out. Returns the samples
 /// (interleaved stereo) at `EXPORT_RATE`.
 pub fn render_song(p: &Project) -> Vec<f32> {
+    render_song_with(p, |_| {})
+}
+
+/// Like `render_song`, with a change made to the copy first (a solo for stems).
+fn render_song_with(p: &Project, prepare: impl FnOnce(&mut Project)) -> Vec<f32> {
     let mut q = copy_for_render(p, EXPORT_RATE as f32);
+    prepare(&mut q);
     q.mode = if q.clips.is_empty() { Mode::Pattern } else { Mode::Song };
     q.current_pattern = p.current_pattern;
     q.playing = true;
@@ -546,6 +552,34 @@ pub fn export_wav(p: &Project, path: &Path) -> io::Result<f32> {
     let samples = render_song(p);
     write_safely(path, &wav_bytes(&samples, EXPORT_RATE))?;
     Ok(samples.len() as f32 / 2.0 / EXPORT_RATE as f32)
+}
+
+/// Mixer inserts that instruments play into (the master excepted), in order.
+pub fn stem_inserts(p: &Project) -> Vec<usize> {
+    let mut v: Vec<usize> = p.channels.iter().map(|c| c.mixer).filter(|&i| i > 0 && i < p.mixer.len()).collect();
+    v.sort_unstable();
+    v.dedup();
+    v
+}
+
+/// One WAV per mixer insert that instruments play into, rendered with that
+/// insert soloed (so its sends and effects stay): "<base> - <insert>.wav".
+/// Returns the files written and their length in seconds.
+pub fn export_stems(p: &Project, dir: &Path, base: &str) -> io::Result<(Vec<PathBuf>, f32)> {
+    let mut files = Vec::new();
+    let mut secs = 0.0;
+    for i in stem_inserts(p) {
+        let samples = render_song_with(p, |q| {
+            for (k, t) in q.mixer.iter_mut().enumerate() {
+                t.solo = k == i;
+            }
+        });
+        let path = path_in(dir, &format!("{} - {}", base.trim(), p.mixer[i].name), "wav");
+        write_safely(&path, &wav_bytes(&samples, EXPORT_RATE))?;
+        secs = samples.len() as f32 / 2.0 / EXPORT_RATE as f32;
+        files.push(path);
+    }
+    Ok((files, secs))
 }
 
 /// Renders and writes an MP3 file. Returns its length in seconds.
@@ -698,6 +732,31 @@ mod tests {
         let wav = wav_bytes(&samples, EXPORT_RATE);
         assert_eq!(&wav[0..4], b"RIFF");
         assert_eq!(wav.len(), 44 + samples.len() * 2);
+    }
+
+    #[test]
+    fn stems_hold_one_track_each() {
+        let mut p = Project::new();
+        // Kick (insert 1) on step 1, clap (insert 2) on step 5.
+        p.patterns[0].set_step(0, 0, true);
+        p.patterns[0].set_step(1, 4, true);
+        assert_eq!(stem_inserts(&p)[..2], [p.channels[0].mixer, p.channels[1].mixer]);
+        let dir = std::env::temp_dir().join(format!("beatstudio-stems-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (files, _) = export_stems(&p, &dir, "Song").unwrap();
+        assert_eq!(files.len(), stem_inserts(&p).len());
+        let read = |f: &Path| -> Vec<f32> {
+            let b = std::fs::read(f).unwrap();
+            b[44..].chunks(2).map(|c| i16::from_le_bytes([c[0], c[1]]) as f32 / i16::MAX as f32).collect()
+        };
+        let kick = read(&files[0]);
+        let clap = read(&files[1]);
+        // A step at 130 BPM lasts 0.115 s: the kick sounds in step 1 and the clap file is silent there.
+        let step1 = (0.1 * EXPORT_RATE as f32) as usize * 2;
+        assert!(kick[..step1].iter().any(|x| x.abs() > 0.05));
+        assert!(clap[..step1].iter().all(|x| x.abs() < 1e-3));
+        assert!(clap.iter().any(|x| x.abs() > 0.05));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

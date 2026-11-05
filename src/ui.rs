@@ -127,6 +127,8 @@ enum FileAction {
     ExportWav,
     ExportMp3,
     ExportMidi,
+    /// One WAV per mixer track; the name is the start of each file name.
+    ExportStems,
 }
 
 impl FileAction {
@@ -138,6 +140,7 @@ impl FileAction {
             FileAction::ExportWav => ("Export to WAV", "Export"),
             FileAction::ExportMp3 => ("Export to MP3", "Export"),
             FileAction::ExportMidi => ("Export to MIDI", "Export"),
+            FileAction::ExportStems => ("Export one WAV per mixer track", "Export"),
         }
     }
 
@@ -145,7 +148,7 @@ impl FileAction {
         match self {
             FileAction::Open | FileAction::Save => file::projects_dir(),
             FileAction::SaveTemplate => file::folder(file::TEMPLATES),
-            FileAction::ExportWav | FileAction::ExportMp3 => file::folder(file::RENDERED),
+            FileAction::ExportWav | FileAction::ExportMp3 | FileAction::ExportStems => file::folder(file::RENDERED),
             FileAction::ExportMidi => file::folder(file::SCORES),
         }
     }
@@ -153,7 +156,7 @@ impl FileAction {
     fn ext(self) -> &'static str {
         match self {
             FileAction::Open | FileAction::Save | FileAction::SaveTemplate => file::EXTENSION,
-            FileAction::ExportWav => "wav",
+            FileAction::ExportWav | FileAction::ExportStems => "wav",
             FileAction::ExportMp3 => "mp3",
             FileAction::ExportMidi => "mid",
         }
@@ -556,6 +559,14 @@ impl StudioApp {
                     FileAction::ExportMp3 => match file::export_mp3(p, &path) {
                         Ok(secs) => {
                             self.hint = exported(secs);
+                            Ok(())
+                        }
+                        Err(e) => Err(format!("Could not export: {e}")),
+                    },
+                    FileAction::ExportStems => match file::export_stems(p, &dir, &d.name) {
+                        Ok((files, _)) if files.is_empty() => Err("No instrument plays into a mixer track".into()),
+                        Ok((files, secs)) => {
+                            self.hint = format!("Exported {} tracks of {:.1} s to {}", files.len(), secs, dir.display());
                             Ok(())
                         }
                         Err(e) => Err(format!("Could not export: {e}")),
@@ -1218,6 +1229,10 @@ impl StudioApp {
                 }
                 if ui.button("MIDI file...").clicked() {
                     self.ask_file(FileAction::ExportMidi, p);
+                    ui.close_menu();
+                }
+                if ui.button("Mixer tracks (one WAV each)...").on_hover_text("Stems: each mixer track that an instrument plays into, alone").clicked() {
+                    self.ask_file(FileAction::ExportStems, p);
                     ui.close_menu();
                 }
             });
