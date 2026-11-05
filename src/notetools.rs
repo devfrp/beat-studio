@@ -809,3 +809,82 @@ mod tests_riff {
         assert!(notes.is_empty());
     }
 }
+
+// ---------------------------------------------------------------- chord names
+
+/// The name of the chord the keys make ("Am7", "C/E"), or None.
+pub fn chord_name(keys: &[u8]) -> Option<String> {
+    // Distinct pitch classes (0..11)
+    let mut pitches: Vec<u8> = keys.iter().map(|&k| k % 12).collect();
+    pitches.sort_unstable();
+    pitches.dedup();
+
+    if pitches.len() < 2 {
+        return None;
+    }
+
+    // Lowest key's pitch class
+    let min_key = *keys.iter().min().unwrap();
+    let lowest_pitch = min_key % 12;
+
+    // Root candidates: lowest pitch first, then others in increasing order
+    let mut roots = vec![lowest_pitch];
+    for &p in &pitches {
+        if p != lowest_pitch {
+            roots.push(p);
+        }
+    }
+
+    // Chord shapes and suffixes in the specified order
+    let shapes: [(&[u8], &str); 10] = [
+        (&[0, 4, 7], ""),
+        (&[0, 3, 7], "m"),
+        (&[0, 3, 6], "dim"),
+        (&[0, 4, 8], "aug"),
+        (&[0, 2, 7], "sus2"),
+        (&[0, 5, 7], "sus4"),
+        (&[0, 4, 7, 10], "7"),
+        (&[0, 4, 7, 11], "maj7"),
+        (&[0, 3, 7, 10], "m7"),
+        (&[0, 7], "5"),
+    ];
+
+    let note_names = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+
+    for &root in &roots {
+        for (intervals, suffix) in &shapes {
+            let mut set: Vec<u8> = intervals.iter().map(|i| (root + i) % 12).collect();
+            set.sort_unstable();
+            if set == pitches {
+                let name = format!("{}{}", note_names[root as usize], suffix);
+                return Some(if root == lowest_pitch { name } else { format!("{name}/{}", note_names[lowest_pitch as usize]) });
+            }
+        }
+    }
+
+    None
+}
+
+#[cfg(test)]
+mod tests_chord {
+    use super::*;
+
+    #[test]
+    fn test_chord_name() {
+        assert_eq!(chord_name(&[60, 64, 67]), Some("C".to_string()));
+        assert_eq!(chord_name(&[57, 60, 64]), Some("Am".to_string()));
+        assert_eq!(chord_name(&[59, 62, 65]), Some("Bdim".to_string()));
+        assert_eq!(chord_name(&[60, 64, 68]), Some("Caug".to_string()));
+        assert_eq!(chord_name(&[62, 64, 69]), Some("Dsus2".to_string()));
+        assert_eq!(chord_name(&[67, 72, 74]), Some("Gsus4".to_string()));
+        assert_eq!(chord_name(&[55, 59, 62, 65]), Some("G7".to_string()));
+        assert_eq!(chord_name(&[60, 64, 67, 71]), Some("Cmaj7".to_string()));
+        assert_eq!(chord_name(&[57, 60, 64, 67]), Some("Am7".to_string()));
+        assert_eq!(chord_name(&[48, 55]), Some("C5".to_string()));
+        assert_eq!(chord_name(&[64, 67, 72]), Some("C/E".to_string()));
+        assert_eq!(chord_name(&[60, 64, 69]), Some("Am/C".to_string()));
+        assert_eq!(chord_name(&[60, 72]), None);
+        assert_eq!(chord_name(&[]), None);
+        assert_eq!(chord_name(&[60, 61, 62]), None);
+    }
+}

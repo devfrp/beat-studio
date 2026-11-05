@@ -375,7 +375,10 @@ impl StudioApp {
             ui.label(egui::RichText::new("Snap: step").color(TEXT_DIM).size(11.0));
             ui.label(egui::RichText::new(format!("New note: {} steps", self.last_note_len / TICKS_PER_STEP)).color(TEXT_DIM).size(11.0));
             if !self.note_sel.is_empty() {
-                ui.label(egui::RichText::new(format!("{} selected", self.note_sel.len())).color(NOTE_SELECTED).size(11.0));
+                let keys: Vec<u8> = self.note_sel.iter().filter_map(|&i| p.patterns[pat].notes[ch].get(i)).filter(|n| n.vel > 0).map(|n| n.key).collect();
+                let chord = notetools::chord_name(&keys).map(|c| format!(" · {c}")).unwrap_or_default();
+                ui.label(egui::RichText::new(format!("{} selected{chord}", self.note_sel.len())).color(NOTE_SELECTED).size(11.0))
+                    .on_hover_text("The chord the selected notes make, when they make one");
             }
             if ui.small_button("Clear").clicked() {
                 p.patterns[pat].notes[ch].clear();
