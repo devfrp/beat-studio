@@ -18,13 +18,20 @@
 - Browser : tous les dossiers fonctionnent.
 - 68 tests passent, plus 3 avec les vrais plugins et leurs fenêtres (`cargo test -- --include-ignored`), `cargo clippy` sans avertissement.
 
-## Pas encore vérifié à la main
+## Vérifié par clics rejoués (BEATSTUDIO_INPUT, captures dans `shots/`)
 
-Ces fonctions compilent et leur logique est testée, mais personne n'a encore cliqué dedans :
+Menu Tools du Piano roll jusqu'au riff (A minor), sous-menu Steps du Channel rack (Fill each 2 steps),
+clic droit sur la règle (insérer une mesure : blocs et automation suivent), Ctrl+glisser un bloc (copie),
+Maj+glisser sur un couloir d'automation (dessin), ajout d'un Chorus dans le Mixer.
 
-- sélection et copier-coller dans le Piano roll, couloir de vélocité, menu Tools ;
-- points d'automation et dessin à main levée dans la Playlist, automation en mode PAT ;
-- fenêtre des paramètres d'un plugin, et le bouton « Open plugin window » depuis l'application (la fenêtre elle-même est vérifiée par le test) ;
+## Pas encore vérifié
+
+Ces fonctions compilent et leur logique est testée, mais personne ne les a essayées :
+
+- sélection et copier-coller dans le Piano roll, couloir de vélocité ;
+- automation en mode PAT (à l'oreille) ;
+- fenêtre des paramètres d'un plugin et « Plugin window » depuis l'application (la fenêtre elle-même est vérifiée par le test) ;
+- son du Chorus et du Phaser (à l'oreille), export par piste depuis le menu ;
 - prise réelle au micro.
 
 ## Limites connues
