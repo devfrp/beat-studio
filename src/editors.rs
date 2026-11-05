@@ -3,6 +3,7 @@
 use eframe::egui::{self, pos2, vec2, Align2, Color32, FontId, Key, Pos2, Rect, Sense, Stroke, Ui};
 
 use crate::effects::{Effect, EffectKind, FX_SLOTS};
+use crate::notetools;
 use crate::engine::{self, Instrument, Mode, Note, Project, Target, MIXER_INSERTS, NOTE_VELOCITY, STEPS_PER_BAR, TICKS_PER_BAR, TICKS_PER_STEP};
 use crate::ui::{DragKind, NoteAction, PianoDrag, PickFor, PluginTarget, StudioApp};
 use crate::widgets::*;
@@ -263,6 +264,41 @@ impl StudioApp {
         (pat, ch)
     }
 
+    /// Applies a piano roll tool to the selected notes (all notes when none
+    /// is selected). Length markers (velocity 0) are left alone.
+    fn note_tool(&mut self, p: &mut Project, pat: usize, ch: usize, tool: NoteTool) {
+        let list = &mut p.patterns[pat].notes[ch];
+        let picked: Vec<usize> = if self.note_sel.is_empty() {
+            (0..list.len()).filter(|&i| list[i].vel > 0).collect()
+        } else {
+            self.note_sel.iter().copied().filter(|&i| i < list.len() && list[i].vel > 0).collect()
+        };
+        if picked.is_empty() {
+            self.hint = "No notes to change".into();
+            return;
+        }
+        let mut notes: Vec<Note> = picked.iter().map(|&i| list[i]).collect();
+        match tool {
+            NoteTool::Quantize => notetools::quantize(&mut notes, TICKS_PER_STEP),
+            NoteTool::Legato => notetools::legato(&mut notes),
+            NoteTool::Reverse => notetools::reverse(&mut notes),
+            NoteTool::Chop => {
+                let pieces = notetools::chop(&notes, TICKS_PER_STEP);
+                let mut rest: Vec<Note> = list.iter().enumerate().filter(|(i, _)| !picked.contains(i)).map(|(_, n)| *n).collect();
+                let first = rest.len();
+                rest.extend(pieces);
+                *list = rest;
+                if !self.note_sel.is_empty() {
+                    self.note_sel = (first..list.len()).collect();
+                }
+                return;
+            }
+        }
+        for (&i, n) in picked.iter().zip(notes) {
+            list[i] = n;
+        }
+    }
+
     fn piano_ui(&mut self, ui: &mut Ui, p: &mut Project, ch: usize) {
         let (pat, _) = self.check_selection(p);
         ui.horizontal(|ui| {
@@ -276,6 +312,21 @@ impl StudioApp {
                 p.patterns[pat].notes[ch].clear();
                 self.note_sel.clear();
             }
+            let what = if self.note_sel.is_empty() { "all notes" } else { "the selected notes" };
+            ui.menu_button("Tools", |ui| {
+                ui.label(egui::RichText::new(format!("On {what}")).color(TEXT_DIM).size(10.0));
+                for (tool, label, tip) in [
+                    (NoteTool::Quantize, "Quantize", "Snap starts and lengths to the step grid"),
+                    (NoteTool::Legato, "Legato", "Each note lasts until the next one starts"),
+                    (NoteTool::Chop, "Chop", "Cut notes into one-step pieces"),
+                    (NoteTool::Reverse, "Reverse", "Play the notes backwards in time"),
+                ] {
+                    if ui.button(label).on_hover_text(tip).clicked() {
+                        self.note_tool(p, pat, ch, tool);
+                        ui.close_menu();
+                    }
+                }
+            });
             ui.label(
                 egui::RichText::new("click: add · drag: move · drag the end: resize · right-click: delete · Ctrl+drag: select · bottom: velocity")
                     .color(TEXT_DIM)
@@ -971,4 +1022,12 @@ impl StudioApp {
             self.selected_insert = i;
         }
     }
+}
+
+#[derive(Clone, Copy)]
+enum NoteTool {
+    Quantize,
+    Legato,
+    Chop,
+    Reverse,
 }

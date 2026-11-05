@@ -4,6 +4,7 @@ mod effects;
 mod engine;
 mod file;
 mod midi;
+mod notetools;
 mod plugin;
 mod record;
 mod settings;

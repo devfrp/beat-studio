@@ -7,20 +7,20 @@
 - Exports : WAV, MP3 (bibliothèque LAME du système), MIDI. Import MIDI.
 - Jeu en direct : métronome, tempo au tap, clavier d'ordinateur en piano, clavier MIDI, enregistrement des notes.
 - Annuler / rétablir (Ctrl+Z / Ctrl+Y).
-- Piano roll : sélection, copier / couper / coller / dupliquer, flèches, couloir de vélocité.
+- Piano roll : sélection, copier / couper / coller / dupliquer, flèches, couloir de vélocité, menu Tools (Quantize, Legato, Chop, Reverse).
 - Mixer : solo, envois entre pistes, 10 emplacements d'effets, 6 effets intégrés (Reverb, Delay, EQ, Compressor, Filter, Distortion).
 - Plugins CLAP (instruments et effets) : 239 trouvés sur cette machine, réglages en curseurs, fenêtre propre du plugin (X11), état gardé dans le projet.
 - Sons du disque (WAV, MP3, FLAC, OGG), fichiers déposés sur la fenêtre.
 - Automation (tempo, volumes, panoramiques, réglages des effets) en mode SONG, et en mode PAT à l'endroit où le motif est posé ; points ou dessin à main levée (Maj+glisser).
 - Enregistrement audio depuis le micro.
 - Browser : tous les dossiers fonctionnent.
-- 26 tests passent (`cargo test -- --include-ignored` pour ceux avec les vrais plugins), `cargo clippy` sans avertissement.
+- 33 tests passent, plus 3 avec les vrais plugins et leurs fenêtres (`cargo test -- --include-ignored`), `cargo clippy` sans avertissement.
 
 ## Pas encore vérifié à la main
 
 Ces fonctions compilent et leur logique est testée, mais personne n'a encore cliqué dedans :
 
-- sélection et copier-coller dans le Piano roll, couloir de vélocité ;
+- sélection et copier-coller dans le Piano roll, couloir de vélocité, menu Tools ;
 - points d'automation et dessin à main levée dans la Playlist, automation en mode PAT ;
 - fenêtre des paramètres d'un plugin, et le bouton « Open plugin window » depuis l'application (la fenêtre elle-même est vérifiée par le test) ;
 - prise réelle au micro.
