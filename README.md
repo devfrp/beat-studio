@@ -1,6 +1,6 @@
 # Beat Studio
 
-A small music studio inspired by FL Studio. Build beats step by step, write melodies, arrange them into a song, mix with effects and CLAP plugins, and export to WAV, MP3 or MIDI.
+A small music studio inspired by FL Studio. Build beats step by step, write melodies, arrange them into a song, mix with effects and CLAP or VST3 plugins, and export to WAV, MP3 or MIDI.
 
 Written in Rust, with [egui](https://github.com/emilk/egui) for the interface and [cpal](https://github.com/RustAudio/cpal) for sound. Runs on Linux, Windows and macOS.
 
@@ -40,6 +40,11 @@ xattr -dr com.apple.quarantine "/Applications/Beat Studio.app"
   - macOS: `~/Library/Audio/Plug-Ins/CLAP` and `/Library/Audio/Plug-Ins/CLAP`;
   - Windows: `%COMMONPROGRAMFILES%\CLAP`;
   - plus any folder listed in `CLAP_PATH`.
+- **VST3 plugins** are found in these folders:
+  - Linux: `~/.vst3`, `/usr/lib/vst3` and `/usr/local/lib/vst3`;
+  - macOS: `~/Library/Audio/Plug-Ins/VST3` and `/Library/Audio/Plug-Ins/VST3`;
+  - Windows: `%COMMONPROGRAMFILES%\VST3`;
+  - plus any folder listed in `VST3_PATH`.
 
 ## Build from source
 
@@ -58,7 +63,7 @@ cd beat-studio
 cargo run --release
 ```
 
-The first time it starts, Beat Studio looks for installed CLAP plugins. Each plugin is opened in a separate process, so a plugin that crashes cannot take the studio down. The list is kept in the settings folder:
+The first time it starts, Beat Studio looks for installed CLAP and VST3 plugins. Each plugin is opened in a separate process, so a plugin that crashes cannot take the studio down. The list is kept in the settings folder:
 - Linux: `~/.config/beatstudio`;
 - macOS: `~/Library/Application Support/beatstudio`;
 - Windows: `%APPDATA%\beatstudio`.
@@ -77,6 +82,7 @@ The first time it starts, Beat Studio looks for installed CLAP plugins. Each plu
 - **CLAP plugins**, both instruments and effects, with their own window:
   - on Linux, embedded in an X11 window;
   - on Windows and macOS, the plugin's own floating window, when it offers one.
+- **VST3 plugins**, both instruments and effects, with generic sliders (their own window does not open yet).
 
   Every plugin also gets generic sliders.
 - **Live playing**: computer keyboard as a piano, MIDI keyboard, metronome, tap tempo, recording of notes and of the microphone.
@@ -129,7 +135,7 @@ Projects go in `~/Documents/Beat Studio`, with these subfolders:
 ## Known limits
 
 - The built-in sounds are synthesized, and the effects are the app's own.
-- CLAP plugins only, no VST. On Windows and macOS, a plugin without a floating window can only be set with sliders.
+- On Windows and macOS, a plugin without a floating window can only be set with sliders, and a VST3 only gets sliders for now (no own window yet).
 - Automation lives in lanes at the top of the playlist, not on the tracks.
 - A sound file plays in full for a one-step note, and is cut at the end of a longer note.
 - The Windows and macOS builds come straight from CI and have not been tried by hand yet.
@@ -138,7 +144,7 @@ Projects go in `~/Documents/Beat Studio`, with these subfolders:
 
 ```sh
 cargo test                                # tests
-cargo test -- --include-ignored           # also with the CLAP plugins installed here
+cargo test -- --include-ignored           # also with the CLAP and VST3 plugins installed here
 cargo clippy                              # must stay free of warnings
 cargo run -- --screenshot shots/now.png   # open, take a screenshot, close
 ```

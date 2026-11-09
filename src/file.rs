@@ -779,6 +779,8 @@ mod real {
     #[ignore]
     fn real_plugin_project() {
         let home = std::env::var("HOME").unwrap();
+        let missing = !PathBuf::from(format!("{home}/.clap/Citrus.clap")).exists()
+            || !PathBuf::from(format!("{home}/.clap/Lemon Reverb.clap")).exists();
         let fx = PluginInfo {
             path: PathBuf::from(format!("{home}/.clap/Lemon Reverb.clap")),
             id: "org.openstudio.lemon-reverb".into(),
@@ -793,6 +795,11 @@ mod real {
             vendor: "Lemon Studio".into(),
             instrument: true,
         };
+        if missing {
+            // The two plugins it needs are not installed on this machine.
+            eprintln!("skip: Citrus and Lemon Reverb are not installed in ~/.clap");
+            return;
+        }
         let mut p = Project::new();
         p.mixer[1].fx[0] = Some(Effect::plugin(PluginSlot::new(fx)));
         let mut c = Channel::new("Citrus".into(), Instrument::Plugin, 0);

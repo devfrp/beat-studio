@@ -17,6 +17,7 @@ mod settings;
 mod smf;
 mod tools;
 mod ui;
+mod vst3;
 mod widgets;
 mod x11;
 
@@ -40,10 +41,21 @@ fn main() -> eframe::Result<()> {
         if a == "--screenshot" {
             screenshot = args.next().map(PathBuf::from);
         }
-        // Child process used by the plugin scan (see plugin.rs).
+        // Child processes used by the plugin scans (see plugin.rs and vst3.rs).
         if a == "--clap-scan" {
             let Some(path) = args.next() else { std::process::exit(2) };
             let code = match plugin::scan_file_here(std::path::Path::new(&path)) {
+                Ok(()) => 0,
+                Err(e) => {
+                    eprintln!("{e}");
+                    1
+                }
+            };
+            std::process::exit(code);
+        }
+        if a == "--vst3-scan" {
+            let Some(path) = args.next() else { std::process::exit(2) };
+            let code = match vst3::scan_here(std::path::Path::new(&path)) {
                 Ok(()) => 0,
                 Err(e) => {
                     eprintln!("{e}");

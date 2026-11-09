@@ -75,4 +75,9 @@ impl Lib {
             sys::GetProcAddress(self.0, n)
         }
     }
+
+    /// The raw library handle (a dlopen handle, a module on Windows).
+    pub fn raw(self) -> *mut c_void {
+        self.0
+    }
 }

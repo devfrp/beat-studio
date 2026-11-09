@@ -3,6 +3,10 @@
 // or floating). Its parameters also get generic sliders. Scanning runs each file in a child process
 // (`beatstudio --clap-scan <file>`) so a plugin that crashes cannot take the
 // studio down with it.
+//
+// VST3 plugins live the same way in vst3.rs; `PluginCore` picks the matching
+// backend from the plugin file (`.vst3` against everything else) and hides
+// the difference behind `PluginEffect` and `PluginInstrument`.
 
 use std::collections::HashMap;
 use std::ffi::{c_char, c_void, CStr, CString};
@@ -465,6 +469,10 @@ pub fn plugin_files() -> Vec<PathBuf> {
     for d in search_dirs() {
         walk(&d, 0, &mut out);
     }
+    // VST3 folders are just as scanned (vst3.rs); both kinds share one list.
+    for d in crate::vst3::search_dirs() {
+        crate::vst3::walk_dir(&d, 0, &mut out);
+    }
     out.sort();
     out.dedup();
     out
@@ -502,7 +510,9 @@ pub fn scan_file_here(path: &Path) -> Result<(), String> {
 fn parse_scan(path: &Path, text: &str) -> Vec<PluginInfo> {
     text.lines()
         .filter_map(|l| {
-            let mut f = l.strip_prefix("CLAP\t")?.split('\t');
+            // `CLAP\t` lines from clap scans, `VST3\t` from vst3 scans; the
+            // rest of the line reads the same.
+            let mut f = l.strip_prefix("CLAP\t").or_else(|| l.strip_prefix("VST3\t"))?.split('\t');
             let (id, name, vendor, kind) = (f.next()?, f.next()?, f.next()?, f.next()?);
             Some(PluginInfo { path: path.to_path_buf(), id: id.into(), name: name.into(), vendor: vendor.into(), instrument: kind == "instrument" })
         })
@@ -517,13 +527,15 @@ pub fn scan_all() -> Vec<PluginInfo> {
     }
 }
 
-/// `me` is the Beat Studio program, which answers `--clap-scan`.
+/// `me` is the Beat Studio program, which answers `--clap-scan` and
+/// `--vst3-scan` (the kind of file chooses which one).
 fn scan_with(me: &Path) -> Vec<PluginInfo> {
     use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
     let mut found = Vec::new();
     for path in plugin_files() {
-        let Ok(mut child) = Command::new(me).arg("--clap-scan").arg(&path).stdout(Stdio::piped()).stderr(Stdio::null()).spawn() else { continue };
+        let arg = if crate::vst3::is_plugin_file(&path) { "--vst3-scan" } else { "--clap-scan" };
+        let Ok(mut child) = Command::new(me).arg(arg).arg(&path).stdout(Stdio::piped()).stderr(Stdio::null()).spawn() else { continue };
         let start = Instant::now();
         let status = loop {
             match child.try_wait() {
@@ -1243,48 +1255,129 @@ pub trait HasCore {
 }
 
 /// Shared by effect and instrument plugins: what the interface needs.
+/// `inst` is one of the two backends (see `BackendInst`).
 pub struct PluginCore {
-    inst: Instance,
+    inst: BackendInst,
+}
+
+enum BackendInst {
+    Clap(Instance),
+    Vst3(crate::vst3::Instance),
 }
 
 impl PluginCore {
     pub fn load(info: &PluginInfo, rate: f32, state: Option<&[u8]>) -> Result<PluginCore, String> {
-        let mut inst = Instance::new(info, rate as f64)?;
-        if let Some(s) = state {
-            inst.load_state(s);
-        }
+        let inst = if crate::vst3::is_plugin_file(&info.path) {
+            // VST3 takes the saved state at start (before the buses wake up).
+            BackendInst::Vst3(crate::vst3::Instance::new(info, rate as f64, state)?)
+        } else {
+            let mut inst = Instance::new(info, rate as f64)?;
+            if let Some(s) = state {
+                inst.load_state(s);
+            }
+            BackendInst::Clap(inst)
+        };
         Ok(PluginCore { inst })
     }
+
+    // Only the tests need the raw CLAP instance (windows test).
+    #[cfg(test)]
+    fn as_clap(&mut self) -> Option<&mut Instance> {
+        match &mut self.inst {
+            BackendInst::Clap(inst) => Some(inst),
+            BackendInst::Vst3(_) => None,
+        }
+    }
+
     pub fn params(&self) -> &[Param] {
-        &self.inst.params
+        match &self.inst {
+            BackendInst::Clap(inst) => &inst.params,
+            BackendInst::Vst3(inst) => inst.params(),
+        }
     }
+
+    /// The current value, in the parameter's own min..max range (for VST3
+    /// that range is the normalized 0..1 one).
     pub fn value(&self, id: u32) -> Option<f64> {
-        self.inst.param_value(id)
+        match &self.inst {
+            BackendInst::Clap(inst) => inst.param_value(id),
+            BackendInst::Vst3(inst) => inst.param_value(id),
+        }
     }
+
     pub fn value_text(&self, id: u32, v: f64) -> Option<String> {
-        self.inst.param_text(id, v)
+        match &self.inst {
+            BackendInst::Clap(inst) => inst.param_text(id, v),
+            BackendInst::Vst3(inst) => inst.param_text(id, v),
+        }
     }
+
     pub fn set(&mut self, id: u32, v: f64) {
-        self.inst.set_param(id, v);
+        match &mut self.inst {
+            BackendInst::Clap(inst) => inst.set_param(id, v),
+            BackendInst::Vst3(inst) => inst.set_param(id, v),
+        }
     }
+
     pub fn save_state(&self) -> Option<Vec<u8>> {
-        self.inst.save_state()
+        match &self.inst {
+            BackendInst::Clap(inst) => inst.save_state(),
+            BackendInst::Vst3(inst) => inst.save_state(),
+        }
     }
+
     pub fn idle(&mut self, rate: f32) {
-        self.inst.idle(rate as f64);
+        match &mut self.inst {
+            BackendInst::Clap(inst) => inst.idle(rate as f64),
+            BackendInst::Vst3(inst) => inst.idle(rate as f64),
+        }
     }
-    /// The plugin can show its own window.
+
+    /// The plugin can show its own window (CLAP only for now; VST3 comes
+    /// later with IPlugView).
     pub fn has_gui(&self) -> bool {
-        self.inst.has_gui()
+        match &self.inst {
+            BackendInst::Clap(inst) => inst.has_gui(),
+            BackendInst::Vst3(inst) => inst.has_gui(),
+        }
     }
+
     pub fn gui_open(&self) -> bool {
-        self.inst.gui.is_some()
+        match &self.inst {
+            BackendInst::Clap(inst) => inst.gui.is_some(),
+            BackendInst::Vst3(inst) => inst.gui_open(),
+        }
     }
+
     pub fn open_gui(&mut self, title: &str) -> Result<(), String> {
-        self.inst.open_gui(title)
+        match &mut self.inst {
+            BackendInst::Clap(inst) => inst.open_gui(title),
+            BackendInst::Vst3(inst) => inst.open_gui(title),
+        }
     }
+
     pub fn close_gui(&mut self) {
-        self.inst.close_gui();
+        match &mut self.inst {
+            BackendInst::Clap(inst) => inst.close_gui(),
+            BackendInst::Vst3(inst) => inst.close_gui(),
+        }
+    }
+
+    /// One sound block for an effect slot: `input` (stereo) goes in, the
+    /// first output bus is written back over `output`.
+    pub fn run(&mut self, input: Option<&[[f32; 2]]>, output: &mut [[f32; 2]], tr: &Transport) {
+        match &mut self.inst {
+            BackendInst::Clap(inst) => inst.run(input, output, tr),
+            BackendInst::Vst3(inst) => inst.run(input, output, tr),
+        }
+    }
+
+    /// A note, standing in line for the next block.
+    pub fn note(&mut self, on: bool, key: u8, vel: f32, time: u32) {
+        match &mut self.inst {
+            BackendInst::Clap(inst) => inst.note(on, key, vel, time),
+            BackendInst::Vst3(inst) => inst.note(on, key, vel, time),
+        }
     }
 }
 
@@ -1300,7 +1393,7 @@ impl PluginEffect {
     pub fn process(&mut self, buf: &mut [[f32; 2]], tr: &Transport) {
         self.dry.clear();
         self.dry.extend_from_slice(buf);
-        self.core.inst.run(Some(&self.dry), buf, tr);
+        self.core.run(Some(&self.dry), buf, tr);
     }
 }
 
@@ -1329,17 +1422,17 @@ impl PluginInstrument {
     }
     /// `time` is the frame within the next block; `gate_frames` counts from it.
     pub fn note_on(&mut self, key: u8, vel: f32, time: u32, gate_frames: Option<i64>) {
-        self.core.inst.note(true, key, vel, time);
+        self.core.note(true, key, vel, time);
         if let Some(g) = gate_frames {
             self.pending_offs.push((key, time as i64 + g.max(1)));
         }
     }
     pub fn note_off(&mut self, key: u8) {
-        self.core.inst.note(false, key, 0.0, 0);
+        self.core.note(false, key, 0.0, 0);
     }
     pub fn all_off(&mut self) {
         for k in 0..128 {
-            self.core.inst.note(false, k, 0.0, 0);
+            self.core.note(false, k, 0.0, 0);
         }
         self.pending_offs.clear();
     }
@@ -1357,9 +1450,9 @@ impl PluginInstrument {
             }
         });
         for (key, t) in offs {
-            self.core.inst.note(false, key, 0.0, t);
+            self.core.note(false, key, 0.0, t);
         }
-        self.core.inst.run(None, out, tr);
+        self.core.run(None, out, tr);
     }
 }
 
@@ -1405,6 +1498,17 @@ mod tests {
         assert!(!l[0].instrument);
         assert_eq!(cache_from_text(&cache_to_text(&l)), l);
     }
+
+    #[test]
+    fn vst3_scan_lines_are_read() {
+        // One class per file, id, name, vendor and kind (vst3.rs prints these).
+        let l = parse_scan(Path::new("/x.vst3"), "VST3\tE831FF31F2D54301928EBBEE25697802\tDexed\tDigital Suburban\tinstrument");
+        assert_eq!(l.len(), 1);
+        assert_eq!(l[0].name, "Dexed");
+        assert_eq!(l[0].id, "E831FF31F2D54301928EBBEE25697802");
+        assert!(l[0].instrument);
+        assert_eq!(cache_from_text(&cache_to_text(&l)), l);
+    }
 }
 
 /// Loads every installed plugin and runs sound through it. Needs real
@@ -1419,7 +1523,7 @@ mod real {
         // Tests run from target/debug/deps; the program is in target/debug.
         let me = std::env::current_exe().unwrap().parent().unwrap().parent().unwrap().join("beatstudio");
         let list = scan_with(&me);
-        assert!(!list.is_empty(), "no CLAP plugins installed");
+        assert!(!list.is_empty(), "no plugins installed");
         let tr = Transport { tempo: 120.0, playing: true, beats: 0.0 };
         for info in &list {
             let core = match PluginCore::load(info, 48000.0, None) {
@@ -1461,6 +1565,7 @@ mod real {
         let mut seen = std::collections::HashSet::new();
         let list: Vec<_> = scan_with(&me).into_iter().filter(|i| seen.insert(i.path.clone())).collect();
         let mut opened = 0;
+        let mut with_window = 0;
         let only = std::env::var("BEATSTUDIO_GUI_ONLY").ok();
         let hold = std::env::var("BEATSTUDIO_GUI_HOLD_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(600);
         for info in list.iter().filter(|i| only.as_ref().is_none_or(|o| i.name.contains(o.as_str()))).take(12) {
@@ -1469,6 +1574,7 @@ mod real {
                 println!("--   {:28} no window", info.name);
                 continue;
             }
+            with_window += 1;
             match core.open_gui(&info.name) {
                 Ok(()) => {
                     let start = Instant::now();
@@ -1476,12 +1582,17 @@ mod real {
                         core.idle(48000.0);
                         std::thread::sleep(Duration::from_millis(16));
                     }
-                    let kind = if matches!(core.inst.gui, Some(Some(_))) { "embedded" } else { "floating" };
-                    let timers = core.inst.flags.timers.lock().unwrap().len();
-                    let fds = core.inst.flags.fds.lock().unwrap().len();
-                    let win = match &core.inst.gui {
-                        Some(Some(w)) => format!("0x{:x}", w.id()),
-                        _ => "-".into(),
+                    let (kind, timers, fds, win) = match core.as_clap() {
+                        Some(inst) => (
+                            if matches!(inst.gui, Some(Some(_))) { "embedded" } else { "floating" },
+                            inst.flags.timers.lock().unwrap().len(),
+                            inst.flags.fds.lock().unwrap().len(),
+                            match &inst.gui {
+                                Some(Some(w)) => format!("0x{:x}", w.id()),
+                                _ => "-".into(),
+                            },
+                        ),
+                        None => ("vst3", 0, 0, "-".to_string()),
                     };
                     println!("     timers={timers} fds={fds} window={win}");
                     assert!(core.gui_open(), "{} closed by itself", info.name);
@@ -1492,6 +1603,12 @@ mod real {
                 }
                 Err(e) => println!("FAIL {:28} {e}", info.name),
             }
+        }
+        if with_window == 0 {
+            // Nothing with a window is installed here (VST3 ones have none
+            // yet); the plugins may have been removed from the machine.
+            eprintln!("skip: no plugin with its own window installed");
+            return;
         }
         assert!(opened > 0, "no plugin window opened");
     }

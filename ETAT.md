@@ -12,11 +12,12 @@
 - Channel rack : sous-menu Steps (remplir un pas sur 1, 2, 4 ou 8, décaler, pas au hasard).
 - Mixer : solo, envois entre pistes, 10 emplacements d'effets, 8 effets intégrés (Reverb, Delay, EQ, Compressor, Filter, Distortion, Chorus, Phaser).
 - Plugins CLAP (instruments et effets) : 239 trouvés sur cette machine, réglages en curseurs, fenêtre propre du plugin (X11), état gardé dans le projet.
+- Plugins VST3 (instruments et effets) analyse, notes, réglages en curseurs (les 2048 fausses rampes « MIDI CC » des wrappers JUCE sont filtrées), état gardé dans le projet, son vérifié sur Dexed : `cargo test real_plugins_load_and_process -- --include-ignored`. Leurs propres dossiers : `~/.vst3` et `/usr/lib/vst3` (Linux), plus `VST3_PATH`. Pas de fenêtre propre encore.
 - Sons du disque (WAV, MP3, FLAC, OGG), fichiers déposés sur la fenêtre.
 - Automation (tempo, volumes, panoramiques, réglages des effets) en mode SONG, et en mode PAT à l'endroit où le motif est posé ; points ou dessin à main levée (Maj+glisser).
 - Enregistrement audio depuis le micro.
 - Browser : tous les dossiers fonctionnent.
-- 69 tests passent, plus 3 avec les vrais plugins et leurs fenêtres (`cargo test -- --include-ignored`), `cargo clippy` sans avertissement.
+- 73 tests passent, plus 3 avec les vrais plugins installés ici (`cargo test -- --include-ignored`), `cargo clippy` sans avertissement.
 
 ## Vérifié par clics rejoués (BEATSTUDIO_INPUT, captures dans `shots/`)
 
@@ -39,7 +40,7 @@ Ces fonctions compilent et leur logique est testée, mais personne ne les a essa
 
 ## Limites connues
 
-- Pas de VST, seulement CLAP. La fenêtre propre d'un plugin passe par X11 (XWayland sous Wayland) ; vérifiée sur 12 plugins (Dexed, Lemon…) par `cargo test real_plugin_windows -- --include-ignored`.
+- VST3 pris en charge (sans fenêtre propre : glissières génériques seulement). La fenêtre propre d'un plugin CLAP passe par X11 (XWayland sous Wayland) ; vérifiée sur 12 plugins (Dexed, Lemon…) par `cargo test real_plugin_windows -- --include-ignored`.
 - Un son du disque est joué en entier pour une note d'un pas, coupé à la fin pour une note plus longue.
 - L'automation est sur des couloirs en haut de la Playlist, pas sur les pistes. En mode PAT, un motif absent de la Playlist n'a pas d'automation.
 

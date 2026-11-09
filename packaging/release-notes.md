@@ -32,6 +32,7 @@ The programs are not signed, so you will see a warning the first time:
 - **CLAP plugins** (instruments and effects) with their own window:
   - on Linux, in an X11 window;
   - on Windows and macOS, the plugin's floating window, when it has one.
+- **VST3 plugins** (instruments and effects), found in the usual VST3 folders, with generic sliders — Dexed opens and sounds.
 - **Live playing**:
   - computer keyboard or MIDI keyboard, metronome, tap tempo;
   - recording of notes and of the microphone.
@@ -42,6 +43,6 @@ The programs are not signed, so you will see a warning the first time:
 
 ## Good to know
 
-This is a first release. The automated tests pass, and the interface has been checked on Linux. The Windows and macOS builds come straight from CI and nobody has tried them yet. Bug reports are welcome.
+This is an early release. The automated tests pass, and the interface has been checked on Linux with a handful of real plugins. The Windows and macOS builds come straight from CI and nobody has tried them yet. Bug reports are welcome.
 
 MIT license.
