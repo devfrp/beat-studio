@@ -64,7 +64,8 @@ jobs:
           path: dist/*
 
   macos:
-    runs-on: macos-14
+    # macOS 14 machines were taken away by GitHub; 15 runs universal builds.
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
